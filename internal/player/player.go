@@ -12,6 +12,7 @@ import (
 )
 
 type StreamSet struct {
+	Title       string
 	CombinedURL string
 	VideoURL    string
 	AudioURL    string
@@ -143,8 +144,13 @@ func (c *Client) ResolveStreams(ctx context.Context, watchURL string) (*StreamSe
 	}
 	info := infos[0]
 
+	title := ""
+	if info.Title != nil {
+		title = *info.Title
+	}
+
 	if info.URL != nil && *info.URL != "" {
-		return &StreamSet{CombinedURL: *info.URL}, nil
+		return &StreamSet{Title: title, CombinedURL: *info.URL}, nil
 	}
 
 	if len(info.RequestedFormats) < 2 {
@@ -152,7 +158,7 @@ func (c *Client) ResolveStreams(ctx context.Context, watchURL string) (*StreamSe
 			watchURL, len(info.RequestedFormats))
 	}
 
-	set := &StreamSet{}
+	set := &StreamSet{Title: title}
 	for _, f := range info.RequestedFormats {
 		if f.URL == "" {
 			continue
@@ -170,14 +176,14 @@ func (c *Client) ResolveStreams(ctx context.Context, watchURL string) (*StreamSe
 	return set, nil
 }
 
-func (c *Client) Play(ctx context.Context, watchURL, title string) error {
+func (c *Client) Play(ctx context.Context, watchURL string) error {
 	set, err := c.ResolveStreams(ctx, watchURL)
 	if err != nil {
 		return err
 	}
 
-	if title != "" {
-		_ = c.conn.Set("force-media-title", title)
+	if set.Title != "" {
+		_ = c.conn.Set("force-media-title", set.Title)
 	}
 
 	if set.CombinedURL != "" {

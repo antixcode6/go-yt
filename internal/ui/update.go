@@ -8,7 +8,6 @@ import (
 	"github.com/antixcode6/go-yt/internal/feed"
 	"github.com/antixcode6/go-yt/internal/player"
 	"github.com/antixcode6/go-yt/internal/subscription"
-	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -55,9 +54,9 @@ func loadVideosCmd(fc *feed.Client, channelID string) tea.Cmd {
 	}
 }
 
-func playCmd(p *player.Client, watchURL, title string) tea.Cmd {
+func playCmd(p *player.Client, watchURL string) tea.Cmd {
 	return func() tea.Msg {
-		if err := p.Play(context.Background(), watchURL, title); err != nil {
+		if err := p.Play(context.Background(), watchURL); err != nil {
 			return errMsg(err)
 		}
 		return playStartedMsg{}
@@ -90,6 +89,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case errMsg:
 		m.err = msg
 		m.statusMsg = ""
+		// Defensive: never leave the UI in a state where input mode is set but
+		// the modal isn't rendered. If an error happens during or after an
+		// input session, drop back to the list view.
+		m.inputMode = inputNone
+		m.input.Blur()
 		return m, nil
 
 	case tea.KeyMsg:
@@ -165,11 +169,19 @@ func (m *Model) clampCursor() {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	m.clampCursor()
-
-	if m.adding {
-		return m.handleAddInput(msg)
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
 	}
+
+	if m.inputMode != inputNone {
+		return m.handleInput(msg)
+	}
+
+	if msg.String() == "q" {
+		return m, tea.Quit
+	}
+	m.clampCursor()
 
 	switch msg.String() {
 	case "q", "ctrl+c":
@@ -177,10 +189,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "esc":
 		if m.screen == ScreenPlayer {
-			m.player.Stop()
+			_ = m.player.Stop()
 			m.statusMsg = ""
 		}
-
 		if m.screen != ScreenSubscriptions {
 			m.screen = ScreenSubscriptions
 		}
@@ -193,8 +204,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "down", "j":
-		max := m.maxCursor()
-		if m.cursor < max {
+		if m.cursor < m.maxCursor() {
 			m.cursor++
 		}
 		return m, nil
@@ -209,15 +219,21 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			vid := m.videos[m.cursor]
 			m.screen = ScreenPlayer
 			m.statusMsg = "Loading " + vid.Title + "…"
-			return m, playCmd(m.player, vid.URL, vid.Title)
+			return m, playCmd(m.player, vid.URL)
 		}
 		return m, nil
 
 	case "a":
 		if m.screen == ScreenSubscriptions {
-			m.adding = true
-			m.input.Focus()
-			return m, textinput.Blink // cursor blinker, lol
+			return m, m.openInput(inputAddSub)
+		}
+		return m, nil
+
+	case "v":
+		// Ad-hoc play: available anywhere except the player screen, where
+		// the input would be obscured.
+		if m.screen != ScreenPlayer {
+			return m, m.openInput(inputPlayURL)
 		}
 		return m, nil
 
@@ -242,7 +258,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case " ":
 		if m.screen == ScreenPlayer {
-			// Optimistic UI update; the next tick will correct it if wrong.
 			m.paused = !m.paused
 			return m, pauseCmd(m.player)
 		}
@@ -276,13 +291,15 @@ func (m Model) maxCursor() int {
 	return 0
 }
 
-func (m Model) handleAddInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "esc":
-		// Cancel: blur and hide the input.
-		m.adding = false
-		m.input.Blur()
-		m.input.SetValue("")
+	case "esc", "ctrl+c":
+		m.closeInput()
+		m.err = nil
+		m.statusMsg = ""
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
 		return m, nil
 
 	case "enter":
@@ -290,15 +307,24 @@ func (m Model) handleAddInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if raw == "" {
 			return m, nil
 		}
-		// Kick off async resolution + add.
-		m.adding = false
-		m.input.Blur()
-		m.input.SetValue("")
-		m.statusMsg = "Adding " + raw + "…"
-		return m, addSubscriptionCmd(m.store, raw, m.cfg.CookiesPath)
+		mode := m.inputMode
+		m.closeInput()
+
+		switch mode {
+		case inputAddSub:
+			m.statusMsg = "Adding " + raw + "…"
+			return m, addSubscriptionCmd(m.store, raw, m.cfg.CookiesPath)
+
+		case inputPlayURL:
+			url := normalizeVideoURL(raw)
+			m.screen = ScreenPlayer
+			m.statusMsg = "Loading…"
+			m.err = nil
+			return m, playCmd(m.player, url)
+		}
+		return m, nil
 	}
 
-	// Everything else goes to the text input.
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	return m, cmd
@@ -325,4 +351,17 @@ func addSubscriptionCmd(store *subscription.Store, raw, cookiesPath string) tea.
 		}
 		return subscriptionAddedMsg{sub: sub}
 	}
+}
+
+// normalizeVideoURL accepts a full URL, a youtu.be short link, or a bare
+// 11-character video ID, and returns something yt-dlp can resolve. Anything
+// with a scheme is passed through unchanged; yt-dlp will produce a clear
+// error if it's not a valid YouTube URL.
+func normalizeVideoURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if strings.Contains(raw, "://") {
+		return raw
+	}
+	// Bare ID or malformed input — let yt-dlp reject it if wrong.
+	return "https://www.youtube.com/watch?v=" + raw
 }

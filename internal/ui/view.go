@@ -43,11 +43,16 @@ func (m Model) View() string {
 		b.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(m.err.Error()))
 	}
 
-	b.WriteString("\n\n" + dimStyle.Render("[enter] select  [a] add  [d] remove  [r] refresh  [q] quit"))
+	b.WriteString("\n\n" + dimStyle.Render(
+		"[enter] select  [v] play URL  [a] add sub  [d] remove  [r] refresh  [q] quit"))
 	return b.String()
 }
 
 func (m Model) viewSubscriptions() string {
+	if m.inputMode != inputNone {
+		return m.viewInputModal()
+	}
+
 	if m.adding {
 		return m.viewAddModal()
 	}
@@ -71,6 +76,25 @@ func (m Model) viewSubscriptions() string {
 	return b.String()
 }
 
+func (m Model) viewInputModal() string {
+	var heading string
+	switch m.inputMode {
+	case inputAddSub:
+		heading = "Add subscription"
+	case inputPlayURL:
+		heading = "Play URL"
+	}
+
+	var b strings.Builder
+	b.WriteString(titleStyle.Render(heading) + "\n\n")
+	b.WriteString(m.input.View() + "\n\n")
+	b.WriteString(dimStyle.Render("[enter] confirm   [esc] cancel"))
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		Padding(1, 2).
+		Render(b.String())
+}
+
 func (m Model) viewAddModal() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Add subscription") + "\n\n")
@@ -83,6 +107,10 @@ func (m Model) viewAddModal() string {
 }
 
 func (m Model) viewVideos() string {
+	if m.inputMode != inputNone {
+		return m.viewInputModal()
+	}
+
 	var b strings.Builder
 	if m.selectedSub < len(m.subs) {
 		b.WriteString(titleStyle.Render(m.subs[m.selectedSub].Title) + "\n")
