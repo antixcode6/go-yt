@@ -166,3 +166,32 @@ func (c *Client) resolveChannelName(ctx context.Context, channelURL string) stri
 	}
 	return strings.TrimSpace(result.Stdout)
 }
+
+// FetchHomeFeed fetches videos from a personalized feed (e.g., :ytsubs, :ytrec).
+func (c *Client) FetchHomeFeed(ctx context.Context, feedURL string) ([]*Video, error) {
+	// For personalized feeds, we must use --no-flat-playlist to get full metadata.
+	// This is slower but necessary for a good user experience.
+	result, err := c.withCookies().
+		PlaylistEnd(10).
+		PrintJSON().
+		SkipDownload().
+		Run(ctx, feedURL)
+	if err != nil {
+		return nil, fmt.Errorf("yt-dlp feed fetch %s: %w", feedURL, err)
+	}
+
+	infos, err := result.GetExtractedInfo()
+	if err != nil {
+		return nil, err
+	}
+
+	videos := make([]*Video, 0, len(infos))
+	for _, info := range infos {
+		if info.ID == "" {
+			continue
+		}
+
+		videos = append(videos, &Video{ID: info.ID, Title: *info.Title, URL: "https://www.youtube.com/watch?v=" + info.ID /* ... */})
+	}
+	return videos, nil
+}

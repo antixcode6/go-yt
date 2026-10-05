@@ -19,6 +19,11 @@ type (
 	errMsg          error
 )
 
+type discoverVideosMsg struct {
+	videos []*feed.Video
+	title  string
+}
+
 type subscriptionAddedMsg struct {
 	sub *subscription.Subscription
 }
@@ -60,6 +65,33 @@ func playCmd(p *player.Client, watchURL string) tea.Cmd {
 			return errMsg(err)
 		}
 		return playStartedMsg{}
+	}
+}
+
+func fetchSearchResultsCmd(fc *feed.Client, query string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		// ytsearch is a yt-dlp pseudo-URL. The number prefix limits results.
+		videos, err := fc.FetchHomeFeed(ctx, "ytsearch20:"+query)
+		if err != nil {
+			return errMsg(err)
+		}
+		return discoverVideosMsg{
+			videos: videos,
+			title:  "Search: " + query,
+		}
+	}
+}
+
+func fetchFeedCmd(fc *feed.Client, feedURL string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		videos, err := fc.FetchHomeFeed(ctx, feedURL)
+		if err != nil {
+			return errMsg(err)
+		}
+		// You might want to set a title for the view based on the feed
+		return discoverVideosMsg{videos: videos, title: "Personalized Feed"}
 	}
 }
 
@@ -108,6 +140,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusMsg = ""
 		return m, nil
 
+	case discoverVideosMsg:
+		m.videos = msg.videos
+		m.screen = ScreenVideos
+		m.cursor = 0
+		m.statusMsg = ""
+		m.err = nil
+		return m, nil
+
 	case tickMsg:
 		if m.screen != ScreenPlayer {
 			return m, nil
@@ -154,6 +194,8 @@ func (m *Model) clampCursor() {
 		n = len(m.subs)
 	case ScreenVideos:
 		n = len(m.videos)
+	case ScreenDiscover:
+		n = len(m.discoverSources)
 	default:
 		m.cursor = 0
 		return
@@ -221,6 +263,32 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "Loading " + vid.Title + "…"
 			return m, playCmd(m.player, vid.URL)
 		}
+		if m.screen == ScreenDiscover {
+			if m.cursor >= len(m.discoverSources) {
+				return m, nil
+			}
+			selected := m.discoverSources[m.cursor]
+
+			fc := feed.NewClient(m.cfg.CookiesPath)
+
+			switch selected {
+			case "Recommended for You (Personalized)":
+				m.statusMsg = "Loading recommendations…"
+				return m, fetchFeedCmd(fc, ":ytrec") // Handle personalized recommendations
+			case "Subscriptions Feed (Personalized)":
+				m.statusMsg = "Loading subscription feed…"
+				return m, fetchFeedCmd(fc, ":ytsubs") // Handle personalized subscriptions
+			case "Watch History (Personalized)":
+				m.statusMsg = "Loading watch history…"
+				return m, fetchFeedCmd(fc, ":ythistory") // Handle watch history
+			case "Search YouTube":
+				return m, m.openInput(inputSearch) // Open a modal for search input
+			case "Local Recommendations":
+				m.statusMsg = "Building local recommendations…"
+				return m, m.fetchLocalRecommendationsCmd() // Synthesize recommendations locally
+			}
+			return m, nil
+		}
 		return m, nil
 
 	case "a":
@@ -243,6 +311,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			_ = m.store.Remove(sub.ChannelID)
 			_ = m.store.Save()
 			return m, loadSubsCmd(m.store)
+		}
+		return m, nil
+
+	case "D":
+		if m.screen == ScreenSubscriptions {
+			m.screen = ScreenDiscover
+			m.cursor = 0 // ← was m.discoverCursor = 0
+			return m, nil
 		}
 		return m, nil
 
@@ -276,17 +352,19 @@ func pauseCmd(p *player.Client) tea.Cmd {
 }
 
 func (m Model) maxCursor() int {
-	if m.screen == ScreenSubscriptions {
+	switch m.screen {
+	case ScreenSubscriptions:
 		if len(m.subs) == 0 {
 			return 0
 		}
 		return len(m.subs) - 1
-	}
-	if m.screen == ScreenVideos {
+	case ScreenVideos:
 		if len(m.videos) == 0 {
 			return 0
 		}
 		return len(m.videos) - 1
+	case ScreenDiscover:
+		return len(m.discoverSources) - 1
 	}
 	return 0
 }
@@ -321,6 +399,18 @@ func (m Model) handleInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "Loading…"
 			m.err = nil
 			return m, playCmd(m.player, url)
+
+		case inputSearch:
+			query := strings.TrimSpace(m.input.Value())
+			if query == "" {
+				return m, nil
+			}
+			m.screen = ScreenVideos
+			m.cursor = 0
+			m.statusMsg = "Searching for \"" + query + "\"…"
+			m.err = nil
+			fc := feed.NewClient(m.cfg.CookiesPath)
+			return m, fetchSearchResultsCmd(fc, query)
 		}
 		return m, nil
 	}
@@ -364,4 +454,56 @@ func normalizeVideoURL(raw string) string {
 	}
 	// Bare ID or malformed input — let yt-dlp reject it if wrong.
 	return "https://www.youtube.com/watch?v=" + raw
+}
+
+// fetchLocalRecommendationsCmd synthesizes a recommendation list from the
+// user's subscriptions. No network calls — it just interleaves the cached
+// video lists from each channel, newest first, round-robin style so no
+// single channel dominates the top of the feed.
+func (m Model) fetchLocalRecommendationsCmd() tea.Cmd {
+	// Copy the slice header so the goroutine doesn't race with later updates
+	// to m.subs. The underlying Subscription pointers are read-only here.
+	subs := append([]*subscription.Subscription(nil), m.subs...)
+	return func() tea.Msg {
+		videos := synthesizeRecommendations(subs, 30)
+		return discoverVideosMsg{
+			videos: videos,
+			title:  "Local Recommendations",
+		}
+	}
+}
+
+// synthesizeRecommendations interleaves each channel's cached videos,
+// taking the newest from each in turn, until limit is reached or all
+// channels are exhausted. Deduplicates by video ID in case a video appears
+// under multiple channels (collabs, features, etc.).
+func synthesizeRecommendations(subs []*subscription.Subscription, limit int) []*feed.Video {
+	seen := make(map[string]bool)
+	out := make([]*feed.Video, 0, limit)
+
+	// Find the longest video list so we know how many rounds to run.
+	maxLen := 0
+	for _, sub := range subs {
+		if len(sub.Videos) > maxLen {
+			maxLen = len(sub.Videos)
+		}
+	}
+
+	for i := 0; i < maxLen && len(out) < limit; i++ {
+		for _, sub := range subs {
+			if i >= len(sub.Videos) {
+				continue
+			}
+			v := sub.Videos[i]
+			if seen[v.ID] {
+				continue
+			}
+			seen[v.ID] = true
+			out = append(out, v)
+			if len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out
 }

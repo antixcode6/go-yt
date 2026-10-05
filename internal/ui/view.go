@@ -34,6 +34,8 @@ func (m Model) View() string {
 		b.WriteString(m.viewVideos())
 	case ScreenPlayer:
 		b.WriteString(m.viewPlayer())
+	case ScreenDiscover:
+		b.WriteString(m.viewDiscover())
 	}
 
 	if m.statusMsg != "" {
@@ -131,6 +133,22 @@ func (m Model) viewVideos() string {
 			b.WriteString("  " + line + "\n")
 		}
 	}
+	return b.String()
+}
+
+func (m Model) viewDiscover() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("Discover") + "\n\n")
+
+	for i, src := range m.discoverSources {
+		if i == m.cursor {
+			b.WriteString(selectedStyle.Render("▸ "+src) + "\n")
+		} else {
+			b.WriteString("  " + src + "\n")
+		}
+	}
+
+	b.WriteString("\n" + dimStyle.Render("[enter] select   [esc] back   [q] quit"))
 	return b.String()
 }
 

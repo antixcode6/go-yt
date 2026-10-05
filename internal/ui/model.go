@@ -17,12 +17,14 @@ const (
 	ScreenSubscriptions Screen = iota
 	ScreenVideos
 	ScreenPlayer
+	ScreenDiscover
 )
 
 const (
 	inputNone inputMode = iota
 	inputAddSub
 	inputPlayURL
+	inputSearch
 )
 
 // Model is the top-level Bubble Tea model.
@@ -52,6 +54,9 @@ type Model struct {
 	mediaTitle string
 
 	inputMode inputMode
+
+	// Discover screen state
+	discoverSources []string
 }
 
 // NewModel constructs the top-level Bubble Tea model. Subscriptions are loaded
@@ -67,11 +72,16 @@ func NewModel(cfg config.Config, p *player.Client, store *subscription.Store) Mo
 		store:  store,
 		screen: ScreenSubscriptions,
 		input:  ti,
+		discoverSources: []string{
+			"Recommended for You (Personalized)",
+			"Subscriptions Feed (Personalized)",
+			"Watch History (Personalized)",
+			"Search YouTube",
+			"Local Recommendations",
+		},
 	}
 }
 
-// openInput activates the input modal in the given mode with the
-// appropriate placeholder, and returns the blink command.
 func (m *Model) openInput(mode inputMode) tea.Cmd {
 	m.inputMode = mode
 	switch mode {
@@ -79,6 +89,8 @@ func (m *Model) openInput(mode inputMode) tea.Cmd {
 		m.input.Placeholder = "https://youtube.com/@channel or UCxxxx"
 	case inputPlayURL:
 		m.input.Placeholder = "https://youtube.com/watch?v=... or video ID"
+	case inputSearch:
+		m.input.Placeholder = "Search YouTube…"
 	}
 	m.input.SetValue("")
 	m.input.Focus()
