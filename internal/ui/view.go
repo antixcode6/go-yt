@@ -43,11 +43,11 @@ func (m Model) View() string {
 	}
 
 	if m.statusMsg != "" {
-		b.WriteString("\n")
+		b.WriteByte('\n')
 		b.WriteString(statusStyle.Render(m.statusMsg))
 	}
 	if m.err != nil {
-		b.WriteString("\n")
+		b.WriteByte('\n')
 		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(m.err.Error()))
 	}
 	b.WriteString("\n\n")
@@ -67,7 +67,7 @@ func (m Model) viewSubscriptions() string {
 
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Subscriptions"))
-	b.WriteString("\n")
+	b.WriteByte('\n')
 	if len(m.subs) == 0 {
 		b.WriteString(dimStyle.Render("No subscriptions yet. Press 'a' to add a channel."))
 		return b.String()
@@ -76,9 +76,12 @@ func (m Model) viewSubscriptions() string {
 	for i, sub := range m.subs {
 		line := fmt.Sprintf("%-40s  %d videos", sub.Title, len(sub.Videos))
 		if i == m.cursor {
-			b.WriteString(selectedStyle.Render("▸ "+line) + "\n")
+			b.WriteString(selectedStyle.Render("▸ " + line))
+			b.WriteByte('\n')
 		} else {
-			b.WriteString("  " + line + "\n")
+			b.WriteString("  ")
+			b.WriteString(line)
+			b.WriteByte('\n')
 		}
 	}
 	return b.String()
@@ -94,8 +97,12 @@ func (m Model) viewInputModal() string {
 	}
 
 	var b strings.Builder
-	b.WriteString(titleStyle.Render(heading) + "\n\n")
-	b.WriteString(m.input.View() + "\n\n")
+	b.WriteString(titleStyle.Render(heading))
+	b.WriteByte('\n')
+	b.WriteByte('\n')
+	b.WriteString(m.input.View())
+	b.WriteByte('\n')
+	b.WriteByte('\n')
 	b.WriteString(dimStyle.Render("[enter] confirm   [esc] cancel"))
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -105,8 +112,12 @@ func (m Model) viewInputModal() string {
 
 func (m Model) viewAddModal() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Add subscription") + "\n\n")
-	b.WriteString(m.input.View() + "\n\n")
+	b.WriteString(titleStyle.Render("Add subscription"))
+	b.WriteByte('\n')
+	b.WriteByte('\n')
+	b.WriteString(m.input.View())
+	b.WriteByte('\n')
+	b.WriteByte('\n')
 	b.WriteString(dimStyle.Render("[enter] confirm   [esc] cancel"))
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -121,9 +132,11 @@ func (m Model) viewVideos() string {
 
 	var b strings.Builder
 	if m.selectedSub < len(m.subs) {
-		b.WriteString(titleStyle.Render(m.subs[m.selectedSub].Title) + "\n")
+		b.WriteString(titleStyle.Render(m.subs[m.selectedSub].Title))
+		b.WriteByte('\n')
 	} else {
-		b.WriteString(titleStyle.Render("Videos") + "\n")
+		b.WriteString(titleStyle.Render("Videos"))
+		b.WriteByte('\n')
 	}
 
 	if len(m.videos) == 0 {
@@ -134,9 +147,12 @@ func (m Model) viewVideos() string {
 	for i, v := range m.videos {
 		line := fmt.Sprintf("%s  %s", v.Published.Format("2006-01-02"), v.Title)
 		if i == m.cursor {
-			b.WriteString(selectedStyle.Render("▸ "+line) + "\n")
+			b.WriteString(selectedStyle.Render("▸ " + line))
+			b.WriteByte('\n')
 		} else {
-			b.WriteString("  " + line + "\n")
+			b.WriteString("  ")
+			b.WriteString(line)
+			b.WriteByte('\n')
 		}
 	}
 	return b.String()
@@ -144,30 +160,37 @@ func (m Model) viewVideos() string {
 
 func (m Model) viewDiscover() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Discover") + "\n\n")
+	b.WriteString(titleStyle.Render("Discover"))
+	b.WriteString("\n\n")
 
 	for i, src := range m.discoverSources {
 		if i == m.cursor {
-			b.WriteString(selectedStyle.Render("▸ "+src) + "\n")
+			b.WriteString(selectedStyle.Render("▸ " + src))
+			b.WriteByte('\n')
 		} else {
-			b.WriteString("  " + src + "\n")
+			b.WriteString("  ")
+			b.WriteString(src)
+			b.WriteByte('\n')
 		}
 	}
 
-	b.WriteString("\n" + dimStyle.Render("[enter] select   [esc] back   [q] quit"))
+	b.WriteByte('\n')
+	b.WriteString(dimStyle.Render("[enter] select   [esc] back   [q] quit"))
 	return b.String()
 }
 
 func (m Model) viewPlayer() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Now Playing") + "\n")
+	b.WriteString(titleStyle.Render("Now Playing"))
+	b.WriteByte('\n')
 	if m.mediaTitle != "" {
-		b.WriteString(m.mediaTitle + "\n")
+		b.WriteString(m.mediaTitle)
+		b.WriteByte('\n')
 	}
-	b.WriteString(fmt.Sprintf("Position: %s / %s\n",
-		formatDuration(m.pos), formatDuration(m.dur)))
+	fmt.Fprintf(&b, "Position: %s / %s\n", formatDuration(m.pos), formatDuration(m.dur))
 	if m.paused {
-		b.WriteString(statusStyle.Render("⏸ paused") + "\n")
+		b.WriteString(statusStyle.Render("⏸ paused"))
+		b.WriteByte('\n')
 	}
 	b.WriteString(dimStyle.Render("Controls: [space] pause  [esc] back"))
 	return b.String()
@@ -187,8 +210,11 @@ func formatDuration(sec float64) string {
 
 func (m Model) viewLoading() string {
 	var b strings.Builder
-	b.WriteString(m.spinner.View() + "  " + m.loadingMsg)
-	b.WriteString("\n\n" + dimStyle.Render("Please wait…"))
+	b.WriteString(m.spinner.View())
+	b.WriteString("  ")
+	b.WriteString(m.loadingMsg)
+	b.WriteString("\n\n")
+	b.WriteString(dimStyle.Render("Please wait…"))
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
