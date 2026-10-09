@@ -111,7 +111,7 @@ func (c *Client) fetchViaYtdlp(ctx context.Context, channelID string) ([]*Video,
 
 	result, err := c.withCookies().
 		FlatPlaylist().
-		PlaylistEnd(20).
+		PlaylistItems("20").
 		ExtractorArgs("youtubetab:approximate_date").
 		PrintJSON().
 		SkipDownload().
@@ -168,11 +168,14 @@ func (c *Client) resolveChannelName(ctx context.Context, channelURL string) stri
 }
 
 // FetchHomeFeed fetches videos from a personalized feed (e.g., :ytsubs, :ytrec).
-func (c *Client) FetchHomeFeed(ctx context.Context, feedURL string) ([]*Video, error) {
+func (c *Client) FetchHomeFeed(ctx context.Context, feedURL, limit string) ([]*Video, error) {
 	// For personalized feeds, we must use --no-flat-playlist to get full metadata.
 	// This is slower but necessary for a good user experience.
 	result, err := c.withCookies().
-		PlaylistEnd(10).
+		ExtractorArgs("youtubetab:skip=webpage,authcheck").
+		LazyPlaylist().
+		IgnoreErrors().
+		PlaylistItems(limit).
 		PrintJSON().
 		SkipDownload().
 		Run(ctx, feedURL)

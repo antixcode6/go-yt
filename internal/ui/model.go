@@ -5,8 +5,10 @@ import (
 	"github.com/antixcode6/go-yt/internal/feed"
 	"github.com/antixcode6/go-yt/internal/player"
 	"github.com/antixcode6/go-yt/internal/subscription"
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // Screen identifies which view is currently active.
@@ -57,6 +59,13 @@ type Model struct {
 
 	// Discover screen state
 	discoverSources []string
+
+	// Loading stuff
+	loading    bool
+	loadingMsg string
+	spinner    spinner.Model
+
+	playbackStarted bool
 }
 
 // NewModel constructs the top-level Bubble Tea model. Subscriptions are loaded
@@ -65,6 +74,10 @@ func NewModel(cfg config.Config, p *player.Client, store *subscription.Store) Mo
 	ti := textinput.New()
 	ti.CharLimit = 200
 	ti.Width = 60
+
+	sp := spinner.New()
+	sp.Spinner = spinner.Dot
+	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 
 	return Model{
 		cfg:    cfg,

@@ -25,6 +25,10 @@ var (
 )
 
 func (m Model) View() string {
+	if m.loading {
+		return m.viewLoading()
+	}
+
 	var b strings.Builder
 
 	switch m.screen {
@@ -39,14 +43,16 @@ func (m Model) View() string {
 	}
 
 	if m.statusMsg != "" {
-		b.WriteString("\n" + statusStyle.Render(m.statusMsg))
+		b.WriteString("\n")
+		b.WriteString(statusStyle.Render(m.statusMsg))
 	}
 	if m.err != nil {
-		b.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(m.err.Error()))
+		b.WriteString("\n")
+		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(m.err.Error()))
 	}
-
-	b.WriteString("\n\n" + dimStyle.Render(
-		"[enter] select  [v] play URL  [a] add sub  [d] remove  [r] refresh  [q] quit"))
+	b.WriteString("\n\n")
+	b.WriteString(dimStyle.Render(
+		"[enter] select  [D] discover [v] play URL  [a] add sub  [d] remove  [r] refresh  [q] quit"))
 	return b.String()
 }
 
@@ -60,8 +66,8 @@ func (m Model) viewSubscriptions() string {
 	}
 
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Subscriptions") + "\n")
-
+	b.WriteString(titleStyle.Render("Subscriptions"))
+	b.WriteString("\n")
 	if len(m.subs) == 0 {
 		b.WriteString(dimStyle.Render("No subscriptions yet. Press 'a' to add a channel."))
 		return b.String()
@@ -177,4 +183,15 @@ func formatDuration(sec float64) string {
 		return fmt.Sprintf("%d:%02d:%02d", h, m, s)
 	}
 	return fmt.Sprintf("%d:%02d", m, s)
+}
+
+func (m Model) viewLoading() string {
+	var b strings.Builder
+	b.WriteString(m.spinner.View() + "  " + m.loadingMsg)
+	b.WriteString("\n\n" + dimStyle.Render("Please wait…"))
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		Padding(1, 3).
+		Render(b.String())
 }

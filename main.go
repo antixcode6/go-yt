@@ -39,7 +39,13 @@ func main() {
 		fmt.Fprintf(os.Stderr, "failed to start mpv: %v\n", err)
 		os.Exit(1)
 	}
-	defer mpvClient.Close()
+
+	defer func() {
+		err = mpvClient.Close()
+		if err != nil {
+			panic(err)
+		}
+	}()
 
 	subs, err := subscription.LoadAll(cfg.SubscriptionsPath)
 	if err != nil {

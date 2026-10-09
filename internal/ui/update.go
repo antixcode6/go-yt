@@ -2,12 +2,14 @@ package ui
 
 import (
 	"context"
+	"log"
 	"strings"
 	"time"
 
 	"github.com/antixcode6/go-yt/internal/feed"
 	"github.com/antixcode6/go-yt/internal/player"
 	"github.com/antixcode6/go-yt/internal/subscription"
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -68,30 +70,27 @@ func playCmd(p *player.Client, watchURL string) tea.Cmd {
 	}
 }
 
-func fetchSearchResultsCmd(fc *feed.Client, query string) tea.Cmd {
+func fetchSearchResultsCmd(fc *feed.Client, feedURL, limit string) tea.Cmd {
 	return func() tea.Msg {
-		ctx := context.Background()
 		// ytsearch is a yt-dlp pseudo-URL. The number prefix limits results.
-		videos, err := fc.FetchHomeFeed(ctx, "ytsearch20:"+query)
+		videos, err := fc.FetchHomeFeed(context.Background(), feedURL, limit)
 		if err != nil {
 			return errMsg(err)
 		}
 		return discoverVideosMsg{
 			videos: videos,
-			title:  "Search: " + query,
+			title:  feedURL,
 		}
 	}
 }
 
-func fetchFeedCmd(fc *feed.Client, feedURL string) tea.Cmd {
+func fetchFeedCmd(fc *feed.Client, feedURL, limit string) tea.Cmd {
 	return func() tea.Msg {
-		ctx := context.Background()
-		videos, err := fc.FetchHomeFeed(ctx, feedURL)
+		videos, err := fc.FetchHomeFeed(context.Background(), feedURL, limit)
 		if err != nil {
 			return errMsg(err)
 		}
-		// You might want to set a title for the view based on the feed
-		return discoverVideosMsg{videos: videos, title: "Personalized Feed"}
+		return discoverVideosMsg{videos: videos}
 	}
 }
 
@@ -116,17 +115,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case playStartedMsg:
 		m.statusMsg = ""
 		m.err = nil
+		m.playbackStarted = false
 		return m, tickCmd()
 
 	case errMsg:
+		m.loading = false
 		m.err = msg
 		m.statusMsg = ""
-		// Defensive: never leave the UI in a state where input mode is set but
-		// the modal isn't rendered. If an error happens during or after an
-		// input session, drop back to the list view.
-		m.inputMode = inputNone
-		m.input.Blur()
 		return m, nil
+
+	case spinner.TickMsg:
+		if !m.loading {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+
+		return m, cmd
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -141,6 +146,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case discoverVideosMsg:
+		m.loading = false
 		m.videos = msg.videos
 		m.screen = ScreenVideos
 		m.cursor = 0
@@ -153,21 +159,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		if m.player.IsIdle() {
+		// Refresh cached state from mpv.
+		m.pos = m.player.Position()
+		m.dur = m.player.Duration()
+		m.paused = m.player.Paused()
+		m.mediaTitle = m.player.MediaTitle()
+
+		// Mark playback as started once mpv has a duration. Before that, the
+		// file is still resolving/buffering and IsIdle() will be true even
+		// though nothing has gone wrong.
+		if !m.playbackStarted && m.dur > 0 {
+			m.playbackStarted = true
+		}
+
+		// Only treat idle as "finished" after playback has actually begun.
+		if m.playbackStarted && m.player.IsIdle() {
 			m.screen = ScreenVideos
 			m.clampCursor()
 			m.statusMsg = ""
 			m.err = nil
 			m.pos, m.dur, m.paused, m.mediaTitle = 0, 0, false, ""
+			m.playbackStarted = false
 			return m, nil
 		}
-
-		// Refresh cached state from mpv. This is the only place we do IPC
-		// reads, and it runs at most twice a second.
-		m.pos = m.player.Position()
-		m.dur = m.player.Duration()
-		m.paused = m.player.Paused()
-		m.mediaTitle = m.player.MediaTitle()
 
 		return m, tickCmd()
 
@@ -211,9 +225,17 @@ func (m *Model) clampCursor() {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "ctrl+c":
+	log.Printf("key=%q loading=%v", msg.String(), m.loading)
+	log.Printf("screen=%d inputMode=%d cursor=%d", m.screen, m.inputMode, m.cursor)
+	if msg.String() == "ctrl+c" {
 		return m, tea.Quit
+	}
+
+	if m.loading {
+		if msg.String() == "esc" {
+			m.loading = false
+		}
+		return m, nil
 	}
 
 	if m.inputMode != inputNone {
@@ -257,38 +279,41 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			fc := feed.NewClient(m.cfg.CookiesPath)
 			return m, loadVideosCmd(fc, sub.ChannelID)
 		}
+
 		if m.screen == ScreenVideos && m.cursor < len(m.videos) {
 			vid := m.videos[m.cursor]
 			m.screen = ScreenPlayer
+			m.playbackStarted = false // ← add this
 			m.statusMsg = "Loading " + vid.Title + "…"
 			return m, playCmd(m.player, vid.URL)
 		}
+
 		if m.screen == ScreenDiscover {
 			if m.cursor >= len(m.discoverSources) {
 				return m, nil
 			}
 			selected := m.discoverSources[m.cursor]
-
 			fc := feed.NewClient(m.cfg.CookiesPath)
 
 			switch selected {
-			case "Recommended for You (Personalized)":
-				m.statusMsg = "Loading recommendations…"
-				return m, fetchFeedCmd(fc, ":ytrec") // Handle personalized recommendations
 			case "Subscriptions Feed (Personalized)":
-				m.statusMsg = "Loading subscription feed…"
-				return m, fetchFeedCmd(fc, ":ytsubs") // Handle personalized subscriptions
+				m.loading = true
+				m.loadingMsg = "Loading subscriptions feed…"
+				return m, tea.Batch(fetchFeedCmd(fc, ":ytsubs", "20"), m.spinner.Tick)
 			case "Watch History (Personalized)":
-				m.statusMsg = "Loading watch history…"
-				return m, fetchFeedCmd(fc, ":ythistory") // Handle watch history
+				m.loading = true
+				m.loadingMsg = "Loading watch history…"
+				return m, tea.Batch(fetchFeedCmd(fc, ":ythistory", "20"), m.spinner.Tick)
 			case "Search YouTube":
-				return m, m.openInput(inputSearch) // Open a modal for search input
+				return m, m.openInput(inputSearch)
 			case "Local Recommendations":
-				m.statusMsg = "Building local recommendations…"
-				return m, m.fetchLocalRecommendationsCmd() // Synthesize recommendations locally
+				m.loading = true
+				m.loadingMsg = "Building local recommendations…"
+				return m, m.fetchLocalRecommendationsCmd()
 			}
 			return m, nil
 		}
+
 		return m, nil
 
 	case "a":
@@ -396,6 +421,7 @@ func (m Model) handleInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case inputPlayURL:
 			url := normalizeVideoURL(raw)
 			m.screen = ScreenPlayer
+			m.playbackStarted = false
 			m.statusMsg = "Loading…"
 			m.err = nil
 			return m, playCmd(m.player, url)
@@ -410,7 +436,8 @@ func (m Model) handleInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "Searching for \"" + query + "\"…"
 			m.err = nil
 			fc := feed.NewClient(m.cfg.CookiesPath)
-			return m, fetchSearchResultsCmd(fc, query)
+			return m, fetchSearchResultsCmd(fc, "ytsearch20:"+query, "20")
+
 		}
 		return m, nil
 	}
