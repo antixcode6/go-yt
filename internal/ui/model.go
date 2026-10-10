@@ -27,6 +27,7 @@ const (
 	inputAddSub
 	inputPlayURL
 	inputSearch
+	inputImportSubs
 )
 
 // Model is the top-level Bubble Tea model.
@@ -66,6 +67,8 @@ type Model struct {
 	spinner    spinner.Model
 
 	playbackStarted bool
+
+	offset int
 }
 
 // NewModel constructs the top-level Bubble Tea model. Subscriptions are loaded

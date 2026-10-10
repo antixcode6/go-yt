@@ -2,7 +2,10 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,6 +23,15 @@ type (
 	playStartedMsg  struct{}
 	errMsg          error
 )
+
+type importCompletedMsg struct {
+	Added   int
+	Skipped int
+}
+
+type importErrMsg struct {
+	err error
+}
 
 type discoverVideosMsg struct {
 	videos []*feed.Video
@@ -145,6 +157,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusMsg = ""
 		return m, nil
 
+	case subsImportedMsg:
+		m.loading = false
+		m.statusMsg = fmt.Sprintf("Imported %d, skipped %d, failed %d",
+			msg.Added, msg.Skipped, msg.Failed)
+		if len(msg.Failures) > 0 {
+			// Show the first few failures in the status area.
+			shown := msg.Failures
+			if len(shown) > 3 {
+				shown = shown[:3]
+			}
+			m.err = fmt.Errorf("failed: %s", strings.Join(shown, ", "))
+		}
+		return m, loadSubsCmd(m.store)
+
 	case discoverVideosMsg:
 		m.loading = false
 		m.videos = msg.videos
@@ -212,8 +238,10 @@ func (m *Model) clampCursor() {
 		n = len(m.discoverSources)
 	default:
 		m.cursor = 0
+		m.offset = 0
 		return
 	}
+
 	switch {
 	case n == 0:
 		m.cursor = 0
@@ -221,6 +249,27 @@ func (m *Model) clampCursor() {
 		m.cursor = 0
 	case m.cursor >= n:
 		m.cursor = n - 1
+	}
+
+	// Scroll the window to keep the cursor visible.
+	visible := m.visibleRows()
+	switch {
+	case m.cursor < m.offset:
+		m.offset = m.cursor
+	case m.cursor >= m.offset+visible:
+		m.offset = m.cursor - visible + 1
+	}
+
+	// Clamp offset so we don't scroll past the end.
+	maxOffset := n - visible
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if m.offset > maxOffset {
+		m.offset = maxOffset
+	}
+	if m.offset < 0 {
+		m.offset = 0
 	}
 }
 
@@ -271,6 +320,26 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.cursor < m.maxCursor() {
 			m.cursor++
 		}
+		return m, nil
+
+	case "pgdown", "ctrl+d":
+		m.cursor += m.visibleRows()
+		m.clampCursor()
+		return m, nil
+
+	case "pgup", "ctrl+u":
+		m.cursor -= m.visibleRows()
+		m.clampCursor()
+		return m, nil
+
+	case "home", "g":
+		m.cursor = 0
+		m.clampCursor()
+		return m, nil
+
+	case "end", "G":
+		m.cursor = m.maxCursor()
+		m.clampCursor()
 		return m, nil
 
 	case "enter":
@@ -344,6 +413,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.screen = ScreenDiscover
 			m.cursor = 0 // ← was m.discoverCursor = 0
 			return m, nil
+		}
+		return m, nil
+
+	case "i":
+		if m.screen != ScreenPlayer {
+			return m, m.openInput(inputImportSubs)
 		}
 		return m, nil
 
@@ -427,17 +502,19 @@ func (m Model) handleInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, playCmd(m.player, url)
 
 		case inputSearch:
-			query := strings.TrimSpace(m.input.Value())
-			if query == "" {
-				return m, nil
-			}
 			m.screen = ScreenVideos
 			m.cursor = 0
-			m.statusMsg = "Searching for \"" + query + "\"…"
+			m.statusMsg = "Searching for \"" + raw + "\"…"
 			m.err = nil
 			fc := feed.NewClient(m.cfg.CookiesPath)
-			return m, fetchSearchResultsCmd(fc, "ytsearch20:"+query, "20")
+			return m, fetchSearchResultsCmd(fc, raw, "20")
 
+		case inputImportSubs:
+			path := expandHome(raw) // ← use raw, not m.input.Value()
+			m.loading = true
+			m.loadingMsg = "Importing subscriptions…"
+			m.err = nil
+			return m, tea.Batch(importSubsCmd(m.store, path), m.spinner.Tick)
 		}
 		return m, nil
 	}
@@ -445,6 +522,39 @@ func (m Model) handleInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	return m, cmd
+}
+
+func expandHome(path string) string {
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			if path == "~" {
+				return home
+			}
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
+}
+
+type subsImportedMsg struct {
+	Added, Skipped, Failed int
+	Failures               []string
+}
+
+func importSubsCmd(store *subscription.Store, path string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		result, err := subscription.ImportNewPipe(ctx, store, path)
+		if err != nil {
+			return errMsg(err)
+		}
+		return subsImportedMsg{
+			Added:    result.Added,
+			Skipped:  result.Skipped,
+			Failed:   result.Failed,
+			Failures: result.Failures,
+		}
+	}
 }
 
 // addSubscriptionCmd resolves the input to a channel ID, then adds it to the
@@ -533,4 +643,13 @@ func synthesizeRecommendations(subs []*subscription.Subscription, limit int) []*
 		}
 	}
 	return out
+}
+
+func (m Model) visibleRows() int {
+	const chrome = 6
+	n := m.height - chrome
+	if n < 3 {
+		return 3
+	}
+	return n
 }

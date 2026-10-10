@@ -89,9 +89,25 @@ func (s *Store) Add(ctx context.Context, fc *feed.Client, channelID string) (*Su
 	}
 	s.subs[channelID] = sub
 	return sub, nil
+} // Remove unsubscribes from a channel.
+
+// AddLight records a subscription without fetching its videos. Useful for
+// bulk imports where the per-channel network fetch would be prohibitively
+// slow. The Videos slice starts empty; a later Refresh populates it.
+func (s *Store) AddLight(channelID, title string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.subs[channelID]; exists {
+		return false, nil
+	}
+	s.subs[channelID] = &Subscription{
+		ChannelID: channelID,
+		Title:     title,
+	}
+	return true, nil
 }
 
-// Remove unsubscribes from a channel.
 func (s *Store) Remove(channelID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
