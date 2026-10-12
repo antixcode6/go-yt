@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jannson/mpvipc"
@@ -26,6 +28,10 @@ type Options struct {
 	VideoOutput string
 	AudioOnly   bool
 	CookiesPath string
+
+	Protocol GraphicsProtocol
+	Cols     int
+	Rows     int
 }
 
 type Client struct {
@@ -42,14 +48,40 @@ func New(socketPath string, opts Options) (*Client, error) {
 	args := []string{
 		"--idle=yes",
 		"--no-terminal",
-		"--really-quiet",
 		"--input-ipc-server=" + socketPath,
 	}
-	if opts.VideoOutput != "" {
-		args = append(args, "--vo="+opts.VideoOutput)
-	}
-	if opts.AudioOnly {
-		args = append(args, "--vid=no")
+
+	switch opts.Protocol {
+	case ProtocolKitty:
+		args = append(args,
+			"--vo=kitty",
+			"--vo-kitty-alt-screen=yes",
+			"--vo-kitty-config-clear=yes",
+			"--vo-kitty-cols="+strconv.Itoa(opts.Cols),
+			"--vo-kitty-rows="+strconv.Itoa(opts.Rows),
+		)
+		// Shared-memory transfer is much faster but only works locally
+		// and isn't supported on Windows or over SSH.
+		if os.Getenv("SSH_CONNECTION") == "" && os.Getenv("SSH_TTY") == "" {
+			args = append(args, "--vo-kitty-use-shm=yes")
+		}
+		args = append(args, "--really-quiet", "--profile=sw-fast")
+
+	case ProtocolSixel:
+		args = append(args,
+			"--vo=sixel",
+			"--vo-sixel-alt-screen=no",
+			"--vo-sixel-buffered=yes",
+			"--vo-sixel-reqcolors=0",
+			"--vo-sixel-cols="+strconv.Itoa(opts.Cols),
+			"--vo-sixel-rows="+strconv.Itoa(opts.Rows),
+			"--really-quiet",
+			"--profile=sw-fast",
+		)
+
+	default:
+		// Fallback to a window.
+		args = append(args, "--vo=gpu")
 	}
 
 	cmd := exec.Command("mpv", args...)
@@ -254,4 +286,44 @@ func (c *Client) Close() error {
 		}
 	}
 	return nil
+}
+
+// GraphicsProtocol identifies the terminal's native inline-graphics protocol.
+type GraphicsProtocol int
+
+const (
+	ProtocolNone GraphicsProtocol = iota
+	ProtocolKitty
+	ProtocolSixel
+)
+
+// DetectProtocol returns the best graphics protocol the current terminal
+// supports, based on environment variables. It does not probe the terminal
+// with escape sequences — env vars are reliable enough for the terminals we
+// care about and avoid the complexity of tty round-trips.
+func DetectProtocol() GraphicsProtocol {
+	term := os.Getenv("TERM")
+	termProgram := os.Getenv("TERM_PROGRAM")
+
+	// Kitty graphics: kitty, WezTerm, Ghostty.
+	switch {
+	case strings.Contains(term, "kitty"):
+		return ProtocolKitty
+	case termProgram == "WezTerm" || termProgram == "ghostty":
+		return ProtocolKitty
+	}
+
+	// Sixel: foot, mlterm, contour, WezTerm (fallback), xterm with sixel.
+	switch {
+	case termProgram == "foot" || strings.HasPrefix(term, "foot"):
+		return ProtocolSixel
+	case strings.HasPrefix(term, "mlterm"):
+		return ProtocolSixel
+	case strings.HasPrefix(term, "contour"):
+		return ProtocolSixel
+	case strings.Contains(term, "sixel"):
+		return ProtocolSixel
+	}
+
+	return ProtocolNone
 }

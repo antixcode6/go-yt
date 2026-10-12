@@ -130,6 +130,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.playbackStarted = false
 		return m, tickCmd()
 
+	case playbackFinishedMsg:
+		m.screen = ScreenVideos
+		m.playbackStarted = false
+		m.statusMsg = ""
+		m.err = nil
+		return m, nil
+
 	case errMsg:
 		m.loading = false
 		m.err = msg
@@ -351,10 +358,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		if m.screen == ScreenVideos && m.cursor < len(m.videos) {
 			vid := m.videos[m.cursor]
-			m.screen = ScreenPlayer
-			m.playbackStarted = false // ← add this
-			m.statusMsg = "Loading " + vid.Title + "…"
-			return m, playCmd(m.player, vid.URL)
+			return m, tea.Exec(
+				&graphicsPlayer{player: m.player, url: vid.URL},
+				func(err error) tea.Msg { return playbackFinishedMsg{} },
+			)
 		}
 
 		if m.screen == ScreenDiscover {
