@@ -46,11 +46,29 @@ type addErrMsg struct {
 	err error
 }
 
+// playerEventMsg carries something the player wants the UI to show: a load
+// failure, a retry without cookies, or an unexpected mpv exit.
+type playerEventMsg player.Event
+
+// waitPlayerEventCmd blocks until the player reports something. Update
+// re-issues it after every event, so exactly one is always waiting.
+func waitPlayerEventCmd(p *player.Client) tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case ev := <-p.Events():
+			return playerEventMsg(ev)
+		case <-p.Done():
+			return nil
+		}
+	}
+}
+
 // Init returns the initial command.
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		loadSubsCmd(m.store),
 		tea.EnterAltScreen,
+		waitPlayerEventCmd(m.player),
 	)
 }
 
@@ -136,6 +154,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusMsg = ""
 		return m, nil
 
+	case playerEventMsg:
+		if msg.Kind == player.EventRetrying {
+			// Still loading; just say what is happening.
+			m.err = nil
+			m.statusMsg = msg.Message
+		} else {
+			// The load failed for good (or mpv died). Show why and leave the
+			// player screen, which would otherwise wait forever for a duration.
+			m.loading = false
+			m.statusMsg = ""
+			m.err = fmt.Errorf("%s", msg.Message)
+			if m.screen == ScreenPlayer {
+				m.screen = ScreenVideos
+				m.clampCursor()
+			}
+			m.pos, m.dur, m.paused, m.mediaTitle = 0, 0, false, ""
+			m.playbackStarted = false
+		}
+		return m, waitPlayerEventCmd(m.player)
+
 	case spinner.TickMsg:
 		if !m.loading {
 			return m, nil
@@ -196,6 +234,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// though nothing has gone wrong.
 		if !m.playbackStarted && m.dur > 0 {
 			m.playbackStarted = true
+			m.statusMsg = "" // drop any "retrying without cookies" notice
 		}
 
 		// Only treat idle as "finished" after playback has actually begun.
