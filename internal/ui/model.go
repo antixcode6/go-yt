@@ -83,11 +83,12 @@ func NewModel(cfg config.Config, p *player.Client, store *subscription.Store) Mo
 	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 
 	return Model{
-		cfg:    cfg,
-		player: p,
-		store:  store,
-		screen: ScreenSubscriptions,
-		input:  ti,
+		cfg:       cfg,
+		player:    p,
+		store:     store,
+		screen:    ScreenSubscriptions,
+		statusMsg: p.VideoMode(),
+		input:     ti,
 		discoverSources: []string{
 			"Recommended for You (Personalized)",
 			"Subscriptions Feed (Personalized)",

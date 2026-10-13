@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/x/term"
 	"github.com/lrstanley/go-ytdlp"
 
 	"github.com/antixcode6/go-yt/internal/config"
@@ -31,20 +30,11 @@ func main() {
 	socketPath := filepath.Join(os.TempDir(),
 		fmt.Sprintf("mpv-%d-%d.sock", os.Getuid(), os.Getpid()))
 
-	cols, rows, err := term.GetSize(os.Stdout.Fd())
-	if err != nil {
-		cols, rows = 80, 24
-	}
-
 	mpvClient, err := player.New(socketPath, player.Options{
 		VideoOutput: cfg.VideoOutput,
 		AudioOnly:   cfg.AudioOnly,
 		CookiesPath: cfg.CookiesPath,
-		Protocol:    player.DetectProtocol(),
-		Cols:        cols,
-		Rows:        rows,
 	})
-
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to start mpv: %v\n", err)
 		os.Exit(1)
