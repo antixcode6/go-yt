@@ -89,6 +89,7 @@ func NewModel(cfg config.Config, p *player.Client, store *subscription.Store) Mo
 		screen:    ScreenSubscriptions,
 		statusMsg: p.VideoMode(),
 		input:     ti,
+		spinner:   sp,
 		discoverSources: []string{
 			"Recommended for You (Personalized)",
 			"Subscriptions Feed (Personalized)",

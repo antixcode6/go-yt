@@ -111,7 +111,7 @@ func (c *Client) fetchViaYtdlp(ctx context.Context, channelID string) ([]*Video,
 
 	result, err := c.withCookies().
 		FlatPlaylist().
-		PlaylistItems("20").
+		PlaylistItems(":20").
 		ExtractorArgs("youtubetab:approximate_date").
 		PrintJSON().
 		SkipDownload().
@@ -173,7 +173,7 @@ func (c *Client) FetchHomeFeed(ctx context.Context, feedURL, limit string) ([]*V
 	// This is slower but necessary for a good user experience.
 	result, err := c.withCookies().
 		ExtractorArgs("youtubetab:skip=webpage,authcheck").
-		LazyPlaylist().
+		//LazyPlaylist().
 		IgnoreErrors().
 		PlaylistItems(limit).
 		PrintJSON().

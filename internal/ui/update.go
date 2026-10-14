@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,6 +88,7 @@ func loadVideosCmd(fc *feed.Client, channelID string) tea.Cmd {
 		if err != nil {
 			return errMsg(err)
 		}
+		log.Printf("channel %s: fetched %d videos", channelID, len(videos))
 		return videosLoadedMsg(videos)
 	}
 }
@@ -155,10 +157,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case videosLoadedMsg:
+		m.loading = false
 		m.videos = msg
 		m.screen = ScreenVideos
 		m.cursor = 0
+		m.offset = 0
 		m.statusMsg = ""
+		m.err = nil
 		return m, nil
 
 	case playStartedMsg:
@@ -338,8 +343,6 @@ func (m *Model) clampCursor() {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	log.Printf("key=%q loading=%v", msg.String(), m.loading)
-	log.Printf("screen=%d inputMode=%d cursor=%d", m.screen, m.inputMode, m.cursor)
 	if msg.String() == "ctrl+c" {
 		return m, tea.Quit
 	}
@@ -410,7 +413,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.screen == ScreenSubscriptions && m.cursor < len(m.subs) {
 			sub := m.subs[m.cursor]
 			fc := feed.NewClient(m.cfg.CookiesPath)
-			return m, loadVideosCmd(fc, sub.ChannelID)
+			m.loading = true
+			m.loadingMsg = pickLoadFlavor(sub.Title)
+			m.err = nil
+			return m, tea.Batch(loadVideosCmd(fc, sub.ChannelID), m.spinner.Tick)
 		}
 
 		if m.screen == ScreenVideos && m.cursor < len(m.videos) {
@@ -428,17 +434,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			switch selected {
 			case "Subscriptions Feed (Personalized)":
 				m.loading = true
-				m.loadingMsg = "Loading subscriptions feed…"
-				return m, tea.Batch(fetchFeedCmd(fc, ":ytsubs", "20"), m.spinner.Tick)
+				m.loadingMsg = pickLoadFlavor("Loading subscriptions feed…")
+				return m, tea.Batch(fetchFeedCmd(fc, ":ytsubs", ":20"), m.spinner.Tick)
 			case "Watch History (Personalized)":
 				m.loading = true
-				m.loadingMsg = "Loading watch history…"
-				return m, tea.Batch(fetchFeedCmd(fc, ":ythistory", "20"), m.spinner.Tick)
+				m.loadingMsg = "Loading watch history…" // uses slice logic, limit = 20 returns index 20, limit = :20 returns up to index 20
+				return m, tea.Batch(fetchFeedCmd(fc, ":ythistory", ":20"), m.spinner.Tick)
 			case "Search YouTube":
 				return m, m.openInput(inputSearch)
 			case "Local Recommendations":
 				m.loading = true
-				m.loadingMsg = "Building local recommendations…"
+				m.loadingMsg = pickLoadFlavor("Building local recommendations…")
 				return m, m.fetchLocalRecommendationsCmd()
 			}
 			return m, nil
@@ -560,10 +566,16 @@ func (m Model) handleInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case inputSearch:
 			m.screen = ScreenVideos
 			m.cursor = 0
-			m.statusMsg = "Searching for \"" + raw + "\"…"
+			m.offset = 0
+			m.statusMsg = ""
 			m.err = nil
+			m.loading = true
+			m.loadingMsg = pickLoadFlavor("Searching for " + raw)
 			fc := feed.NewClient(m.cfg.CookiesPath)
-			return m, fetchSearchResultsCmd(fc, raw, "20")
+			return m, tea.Batch(
+				fetchSearchResultsCmd(fc, raw, ":20"),
+				m.spinner.Tick,
+			)
 
 		case inputImportSubs:
 			path := expandHome(raw) // ← use raw, not m.input.Value()
@@ -708,4 +720,27 @@ func (m Model) visibleRows() int {
 		return 3
 	}
 	return n
+}
+
+// loadFlavorLines are shown alongside the spinner while a fetch is in
+// progress. Picked once per load so the message is stable while the user
+// waits, but varies across loads.
+var loadFlavorLines = []string{
+	"Tuning the antenna…",
+	"Asking YouTube nicely…",
+	"Warming up the tubes…",
+	"Reassembling the packets…",
+	"Waking up the hamsters…",
+	"Polishing the pixels…",
+	"Paging the CDN…",
+}
+
+// pickLoadFlavor returns a random flavor line, optionally prefixed with the
+// thing being loaded. Pass an empty string for a context-free message.
+func pickLoadFlavor(context string) string {
+	line := loadFlavorLines[rand.IntN(len(loadFlavorLines))]
+	if context != "" {
+		return context + " — " + line
+	}
+	return line
 }
