@@ -173,7 +173,7 @@ func (c *Client) FetchHomeFeed(ctx context.Context, feedURL, limit string) ([]*V
 	// This is slower but necessary for a good user experience.
 	result, err := c.withCookies().
 		ExtractorArgs("youtubetab:skip=webpage,authcheck").
-		//LazyPlaylist().
+		LazyPlaylist().
 		IgnoreErrors().
 		PlaylistItems(limit).
 		PrintJSON().

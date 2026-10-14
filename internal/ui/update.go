@@ -3,7 +3,6 @@ package ui
 import (
 	"context"
 	"fmt"
-	"log"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -88,7 +87,6 @@ func loadVideosCmd(fc *feed.Client, channelID string) tea.Cmd {
 		if err != nil {
 			return errMsg(err)
 		}
-		log.Printf("channel %s: fetched %d videos", channelID, len(videos))
 		return videosLoadedMsg(videos)
 	}
 }
