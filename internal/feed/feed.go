@@ -194,7 +194,7 @@ func (c *Client) FetchHomeFeed(ctx context.Context, feedURL, limit string) ([]*V
 			continue
 		}
 
-		videos = append(videos, &Video{ID: info.ID, Title: *info.Title, URL: "https://www.youtube.com/watch?v=" + info.ID /* ... */})
+		videos = append(videos, &Video{ID: info.ID, Title: *info.Title, URL: "https://www.youtube.com/watch?v=" + info.ID, ChannelName: *info.Channel})
 	}
 	return videos, nil
 }

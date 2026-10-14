@@ -24,15 +24,6 @@ type (
 	errMsg          error
 )
 
-type importCompletedMsg struct {
-	Added   int
-	Skipped int
-}
-
-type importErrMsg struct {
-	err error
-}
-
 type discoverVideosMsg struct {
 	videos []*feed.Video
 	title  string
@@ -157,6 +148,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case videosLoadedMsg:
 		m.loading = false
 		m.videos = msg
+		m.showChannel = false // single-channel view
+		m.screen = ScreenVideos
+		m.cursor = 0
+		m.offset = 0
+		m.statusMsg = ""
+		m.err = nil
+		return m, nil
+
+	case discoverVideosMsg:
+		m.loading = false
+		m.videos = msg.videos
+		m.showChannel = true // mixed-channel view
 		m.screen = ScreenVideos
 		m.cursor = 0
 		m.offset = 0
@@ -237,15 +240,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, loadSubsCmd(m.store)
 
-	case discoverVideosMsg:
-		m.loading = false
-		m.videos = msg.videos
-		m.screen = ScreenVideos
-		m.cursor = 0
-		m.statusMsg = ""
-		m.err = nil
-		return m, nil
-
 	case tickMsg:
 		if m.screen != ScreenPlayer {
 			return m, nil
@@ -319,7 +313,7 @@ func (m *Model) clampCursor() {
 	}
 
 	// Scroll the window to keep the cursor visible.
-	visible := m.visibleRows()
+	visible := m.visibleItems()
 	switch {
 	case m.cursor < m.offset:
 		m.offset = m.cursor
@@ -379,21 +373,23 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.cursor > 0 {
 			m.cursor--
 		}
+		m.clampCursor()
 		return m, nil
 
 	case "down", "j":
 		if m.cursor < m.maxCursor() {
 			m.cursor++
 		}
+		m.clampCursor()
 		return m, nil
 
 	case "pgdown", "ctrl+d":
-		m.cursor += m.visibleRows()
+		m.cursor += m.visibleItems()
 		m.clampCursor()
 		return m, nil
 
 	case "pgup", "ctrl+u":
-		m.cursor -= m.visibleRows()
+		m.cursor -= m.visibleItems()
 		m.clampCursor()
 		return m, nil
 
@@ -434,6 +430,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			case "Subscriptions Feed (Personalized)":
 				m.loading = true
 				m.loadingMsg = pickLoadFlavor("Loading subscriptions feed…")
+				m.videoListTitle = "Subscriptions Feed"
+				m.showChannel = true
 				return m, tea.Batch(fetchFeedCmd(fc, ":ytsubs", ":20"), m.spinner.Tick)
 			case "Watch History (Personalized)":
 				m.loading = true
@@ -742,4 +740,25 @@ func pickLoadFlavor(context string) string {
 		return context + " — " + line
 	}
 	return line
+}
+
+// truncate returns s shortened to at most n runes, with an ellipsis if it
+// was cut. Rune-aware so multi-byte characters don't produce invalid UTF-8.
+func truncate(s string, n int) string {
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n-1]) + "…"
+}
+
+func (m Model) visibleItems() int {
+	rows := m.visibleRows()
+	if m.screen == ScreenVideos && m.showChannel {
+		rows = rows / 2
+	}
+	if rows < 1 {
+		return 1
+	}
+	return rows
 }

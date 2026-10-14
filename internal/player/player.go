@@ -174,7 +174,7 @@ func exitStatus(err error) string {
 // call sends an mpv command and waits for the response. Unlike blang/mpv,
 // mpvipc has no hardcoded timeout — Call blocks until mpv replies. This is
 // why large videos no longer fail with "timeout while receiving response".
-func (c *Client) call(args ...interface{}) error {
+func (c *Client) call(args ...any) error {
 	if c.conn == nil {
 		return errNoIPC
 	}
