@@ -412,6 +412,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		if m.screen == ScreenSubscriptions && m.cursor < len(m.subs) {
 			sub := m.subs[m.cursor]
+			m.selectedSub = m.cursor
 			fc := feed.NewClient(m.cfg.CookiesPath)
 			m.loading = true
 			m.loadingMsg = pickLoadFlavor(sub.Title)
