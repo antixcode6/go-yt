@@ -417,14 +417,18 @@ func TestTerminalMPVDrawsOnTheGivenTerminal(t *testing.T) {
 	if err := e.c.PlayInTerminal("https://www.youtube.com/watch?v=abc", os.Stdin, e.out); err != nil {
 		t.Fatal(err)
 	}
-	if got := e.drawn(t); got != "FRAME\n" {
+	got := e.drawn(t)
+	if !strings.HasPrefix(got, "FRAME\n") {
 		t.Fatalf("mpv's output did not reach the terminal: %q", got)
+	}
+	if !strings.Contains(got[len("FRAME\n"):], kittyDeleteAll) {
+		t.Errorf("leftover kitty images must be deleted after mpv exits: %q", got)
 	}
 	runs := e.runs(t)
 	if len(runs) != 1 {
 		t.Fatalf("want one mpv run, got %v", runs)
 	}
-	for _, want := range []string{"--vo=kitty", "--really-quiet", "-- https://www.youtube.com/watch?v=abc"} {
+	for _, want := range []string{"--vo=kitty", "--really-quiet", "--idle=no", "--keep-open=no", "-- https://www.youtube.com/watch?v=abc"} {
 		if !strings.Contains(runs[0], want) {
 			t.Errorf("args lack %q: %s", want, runs[0])
 		}
@@ -446,8 +450,8 @@ func TestTerminalRetriesWithoutCookies(t *testing.T) {
 		strings.Contains(runs[1], "cookies") {
 		t.Fatalf("want a run with cookies, then one without: %v", runs)
 	}
-	if got := e.drawn(t); got != "FRAME\n" {
-		t.Errorf("drawn = %q", got)
+	if got := e.drawn(t); strings.Count(got, "FRAME\n") != 1 {
+		t.Errorf("the video should be drawn exactly once: %q", got)
 	}
 }
 
@@ -601,5 +605,25 @@ func TestKittyArgsShmIsOptIn(t *testing.T) {
 	t.Setenv("SSH_CONNECTION", "1.2.3.4 1 5.6.7.8 22")
 	if got := strings.Join(terminalArgs(ProtocolKitty), " "); strings.Contains(got, "use-shm") {
 		t.Errorf("shm must stay off over ssh: %s", got)
+	}
+}
+
+func TestResetTerminalPerProtocol(t *testing.T) {
+	read := func(c *Client) string {
+		f, err := os.Create(filepath.Join(t.TempDir(), "tty"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		c.resetTerminal(f)
+		b, _ := os.ReadFile(f.Name())
+		return string(b)
+	}
+	k := read(&Client{protocol: ProtocolKitty})
+	if strings.Count(k, kittyDeleteAll) != 2 || !strings.Contains(k, "\x1b[?1049h") || !strings.HasSuffix(k, "\x1b[?1049l") {
+		t.Errorf("kitty reset = %q", k)
+	}
+	if got := read(&Client{protocol: ProtocolSixel}); !strings.Contains(got, "\x1b[2J") || strings.Contains(got, "_G") {
+		t.Errorf("sixel reset = %q", got)
 	}
 }

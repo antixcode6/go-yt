@@ -44,6 +44,11 @@ func terminalArgs(p GraphicsProtocol) []string {
 		// Messages on stdout would be mixed into the picture.
 		"--really-quiet",
 		"--profile=sw-fast",
+		// One mpv per video: it must exit when playback ends or is stopped,
+		// even if the user's mpv.conf says idle=yes or keep-open=yes.
+		"--idle=no",
+		"--keep-open=no",
+		"--force-window=no",
 	}
 	switch p {
 	case ProtocolKitty:
@@ -122,6 +127,7 @@ func (c *Client) runMPV(url, cookies, logPath string, stdin, stdout *os.File) mp
 	cmd.Stdin, cmd.Stdout = stdin, stdout // Stderr stays /dev/null: it would corrupt the picture
 
 	err := cmd.Run()
+	c.resetTerminal(stdout)
 	if err == nil {
 		return mpvRun{}
 	}
@@ -195,4 +201,24 @@ func (c *Client) VideoMode() string {
 		return "video: mpv default output"
 	}
 	return fmt.Sprintf(`video: mpv --vo=%s (video_output in config.json; set it to "auto" for kitty/sixel)`, c.videoOutput)
+}
+
+// kittyDeleteAll removes every image from the screen being shown (and frees
+// their data). q=2 stops kitty from answering on our stdin.
+const kittyDeleteAll = "\x1b_Ga=d,d=A,q=2\x1b\\"
+
+// resetTerminal removes whatever mpv left on screen. mpv should clean up after
+// itself, but one leftover kitty image would cover the TUI that comes back
+// next, so it is done explicitly here.
+func (c *Client) resetTerminal(out *os.File) {
+	seq := "\x1b[?25h" // show the cursor again
+	switch c.protocol {
+	case ProtocolKitty:
+		// Images belong to a screen, and mpv may have used the alternate one,
+		// so clear the images on both.
+		seq += kittyDeleteAll + "\x1b[?1049h" + kittyDeleteAll + "\x1b[2J\x1b[?1049l"
+	case ProtocolSixel:
+		seq += "\x1b[2J\x1b[H" // sixel pixels are part of the screen; wipe them
+	}
+	_, _ = io.WriteString(out, seq)
 }
