@@ -31,6 +31,11 @@ type Client struct {
 	proc    *exec.Cmd
 	cookies string
 
+	protocol    GraphicsProtocol // terminal graphics in use, or ProtocolNone
+	videoOutput string           // video_output from the config
+	audioOnly   bool
+	termArgs    []string // mpv arguments for PlayInTerminal
+
 	evConn    net.Conn      // second IPC connection, used only to read events
 	exited    chan error    // receives mpv's exit status once the process ends
 	events    chan Event    // load failures, retries, unexpected exits
@@ -55,15 +60,37 @@ func New(socketPath string, opts Options) (*Client, error) {
 
 	_ = os.Remove(socketPath)
 
+	c := &Client{
+		cookies:     opts.CookiesPath,
+		protocol:    ResolveProtocol(opts.VideoOutput, opts.AudioOnly),
+		videoOutput: opts.VideoOutput,
+		audioOnly:   opts.AudioOnly,
+		exited:      make(chan error, 1),
+		events:      make(chan Event, 16),
+		done:        make(chan struct{}),
+	}
+
+	// Kitty/sixel: mpv has to draw on the real terminal, which only a process
+	// attached to it can do. There is no long-lived mpv in this mode; each
+	// video gets its own (see PlayInTerminal).
+	if c.protocol != ProtocolNone {
+		if _, err := exec.LookPath(mpvBinary); err != nil {
+			return nil, fmt.Errorf("find mpv: %w", err)
+		}
+		c.termArgs = terminalArgs(c.protocol)
+		return c, nil
+	}
+
 	args := []string{
 		"--idle=yes",
 		"--no-terminal",
-		"--really-quiet",
 		"--input-ipc-server=" + socketPath,
 		"--ytdl-format=bv*+ba/b",
 	}
-	if opts.VideoOutput != "" {
+	if opts.VideoOutput != "" && opts.VideoOutput != "auto" {
 		args = append(args, "--vo="+opts.VideoOutput)
+	} else if opts.VideoOutput == "auto" {
+		args = append(args, "--vo=gpu") // no terminal graphics detected: use a window
 	}
 	if opts.AudioOnly {
 		args = append(args, "--vid=no")
@@ -76,14 +103,7 @@ func New(socketPath string, opts Options) (*Client, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("spawn mpv: %w", err)
 	}
-
-	c := &Client{
-		proc:    cmd,
-		cookies: opts.CookiesPath,
-		exited:  make(chan error, 1),
-		events:  make(chan Event, 16),
-		done:    make(chan struct{}),
-	}
+	c.proc = cmd
 
 	// Reap the process and report it if it dies while go-yt is still running.
 	go func() {
@@ -155,12 +175,18 @@ func exitStatus(err error) string {
 // mpvipc has no hardcoded timeout — Call blocks until mpv replies. This is
 // why large videos no longer fail with "timeout while receiving response".
 func (c *Client) call(args ...interface{}) error {
+	if c.conn == nil {
+		return errNoIPC
+	}
 	_, err := c.conn.Call(args...)
 	return err
 }
 
 // getString reads a string property, returning "" on any error.
 func (c *Client) getString(property string) string {
+	if c.conn == nil {
+		return ""
+	}
 	v, err := c.conn.Get(property)
 	if err != nil {
 		return ""
@@ -171,6 +197,9 @@ func (c *Client) getString(property string) string {
 
 // getFloat reads a float64 property, returning 0 on any error.
 func (c *Client) getFloat(property string) float64 {
+	if c.conn == nil {
+		return 0
+	}
 	v, err := c.conn.Get(property)
 	if err != nil {
 		return 0
@@ -181,6 +210,9 @@ func (c *Client) getFloat(property string) float64 {
 
 // getBool reads a bool property, returning false on any error.
 func (c *Client) getBool(property string) bool {
+	if c.conn == nil {
+		return false
+	}
 	v, err := c.conn.Get(property)
 	if err != nil {
 		return false
@@ -219,6 +251,9 @@ func (c *Client) SeekRelative(delta float64) error {
 }
 
 func (c *Client) SetVolume(percent int) error {
+	if c.conn == nil {
+		return errNoIPC
+	}
 	return c.conn.Set("volume", percent)
 }
 
@@ -262,4 +297,51 @@ func (c *Client) Close() error {
 		}
 	}
 	return nil
+}
+
+// GraphicsProtocol identifies the terminal's native inline-graphics protocol.
+type GraphicsProtocol int
+
+const (
+	ProtocolNone GraphicsProtocol = iota
+	ProtocolKitty
+	ProtocolSixel
+)
+
+// DetectProtocol returns the best graphics protocol the current terminal
+// supports, based on environment variables. It does not probe the terminal
+// with escape sequences — env vars are reliable enough for the terminals we
+// care about and avoid the complexity of tty round-trips.
+func DetectProtocol() GraphicsProtocol {
+	term := os.Getenv("TERM")
+	termProgram := os.Getenv("TERM_PROGRAM")
+
+	// Inside tmux/screen the graphics escape codes do not reach the terminal
+	// unless passthrough is set up, so fall back to a window.
+	if os.Getenv("TMUX") != "" || strings.HasPrefix(term, "screen") || strings.HasPrefix(term, "tmux") {
+		return ProtocolNone
+	}
+
+	// Kitty graphics: kitty, WezTerm, Ghostty. kitty sets KITTY_WINDOW_ID
+	// even when TERM is overridden (xterm-256color is a common override).
+	switch {
+	case strings.Contains(term, "kitty"), os.Getenv("KITTY_WINDOW_ID") != "":
+		return ProtocolKitty
+	case termProgram == "WezTerm", termProgram == "ghostty", strings.Contains(term, "ghostty"):
+		return ProtocolKitty
+	}
+
+	// Sixel: foot, mlterm, contour, xterm with sixel.
+	switch {
+	case termProgram == "foot" || strings.HasPrefix(term, "foot"):
+		return ProtocolSixel
+	case strings.HasPrefix(term, "mlterm"):
+		return ProtocolSixel
+	case strings.HasPrefix(term, "contour"):
+		return ProtocolSixel
+	case strings.Contains(term, "sixel"):
+		return ProtocolSixel
+	}
+
+	return ProtocolNone
 }

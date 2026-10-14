@@ -163,7 +163,9 @@ var urlRe = regexp.MustCompile(`https?://\S+`)
 func failureReason(lines []logLine) string {
 	pick := ""
 	for _, l := range lines {
-		if l.prefix == "ytdl_hook" && strings.HasPrefix(l.text, "ERROR:") {
+		// "[generic]" errors come from yt-dlp being run on the stream URL after
+		// it already failed; they hide the real reason, so only use them last.
+		if l.prefix == "ytdl_hook" && strings.HasPrefix(l.text, "ERROR:") && !strings.HasPrefix(l.text, "ERROR: [generic]") {
 			pick = l.text
 			break
 		}
@@ -171,6 +173,14 @@ func failureReason(lines []logLine) string {
 	if pick == "" {
 		for _, l := range lines {
 			if l.prefix == "ffmpeg" && strings.Contains(strings.ToLower(l.text), "http error") {
+				pick = l.text
+				break
+			}
+		}
+	}
+	if pick == "" {
+		for _, l := range lines {
+			if l.prefix == "ytdl_hook" && strings.HasPrefix(l.text, "ERROR:") {
 				pick = l.text
 				break
 			}

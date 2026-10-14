@@ -91,6 +91,25 @@ func loadVideosCmd(fc *feed.Client, channelID string) tea.Cmd {
 	}
 }
 
+// startPlayback plays a video the way the configured video output needs.
+// With kitty/sixel, mpv must own the terminal while it plays, so the TUI steps
+// aside (tea.Exec). Otherwise mpv shows its own window and the TUI keeps its
+// player screen.
+func (m Model) startPlayback(url, status string) (tea.Model, tea.Cmd) {
+	m.err = nil
+	if m.player.Terminal() {
+		m.statusMsg = ""
+		return m, tea.Exec(
+			&graphicsPlayer{player: m.player, url: url},
+			func(err error) tea.Msg { return playbackFinishedMsg{err: err} },
+		)
+	}
+	m.screen = ScreenPlayer
+	m.playbackStarted = false
+	m.statusMsg = status
+	return m, playCmd(m.player, url)
+}
+
 func playCmd(p *player.Client, watchURL string) tea.Cmd {
 	return func() tea.Msg {
 		if err := p.Play(context.Background(), watchURL); err != nil {
@@ -147,6 +166,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = nil
 		m.playbackStarted = false
 		return m, tickCmd()
+
+	case playbackFinishedMsg:
+		m.playbackStarted = false
+		m.statusMsg = ""
+		m.err = msg.err
+		return m, nil
 
 	case errMsg:
 		m.loading = false
@@ -390,10 +415,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		if m.screen == ScreenVideos && m.cursor < len(m.videos) {
 			vid := m.videos[m.cursor]
-			m.screen = ScreenPlayer
-			m.playbackStarted = false // ← add this
-			m.statusMsg = "Loading " + vid.Title + "…"
-			return m, playCmd(m.player, vid.URL)
+			return m.startPlayback(vid.URL, "Loading "+vid.Title+"…")
 		}
 
 		if m.screen == ScreenDiscover {
@@ -533,12 +555,7 @@ func (m Model) handleInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, addSubscriptionCmd(m.store, raw, m.cfg.CookiesPath)
 
 		case inputPlayURL:
-			url := normalizeVideoURL(raw)
-			m.screen = ScreenPlayer
-			m.playbackStarted = false
-			m.statusMsg = "Loading…"
-			m.err = nil
-			return m, playCmd(m.player, url)
+			return m.startPlayback(normalizeVideoURL(raw), "Loading…")
 
 		case inputSearch:
 			m.screen = ScreenVideos

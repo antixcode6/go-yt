@@ -44,7 +44,7 @@ The app creates a default config on first run at
 {
   "subscriptions_path": "/home/user/.config/go-yt/subscriptions.json",
   "download_dir": "/home/user/.config/go-yt/downloads",
-  "video_output": "gpu",
+  "video_output": "auto",
   "audio_only": false,
   "cookies_path": ""
 }
@@ -54,7 +54,7 @@ The app creates a default config on first run at
 
 | Field | Description |
 |---|---|
-| `video_output` | mpv `--vo` value. `gpu` opens a window, `tct` renders in-terminal, `null` disables video. |
+| `video_output` | `auto` uses kitty or sixel graphics when your terminal supports them, else an mpv window. `kitty` / `sixel` force one. Any other value is passed to mpv as `--vo` (`gpu` window, `tct` text, `null` no video). |
 | `audio_only` | Adds `--vid=no` to mpv. Pair with `video_output: "null"` for a music-player mode. |
 | `cookies_path` | Path to a Netscape-format `cookies.txt`. Required for personalized feeds, subscriptions, and history. |
 

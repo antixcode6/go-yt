@@ -11,11 +11,14 @@ type Config struct {
 	SubscriptionsPath string `json:"subscriptions_path"`
 	DownloadDir       string `json:"download_dir"`
 
-	// VideoOutput maps to mpv's --vo option. Common choices:
-	//   "tct"  → render video directly in the terminal (experimental; the
-	//            TUI must suspend itself while a video is playing)
-	//   "null" → no video; pair with AudioOnly for a music-style player
-	//   "gpu"  → a normal mpv window alongside the TUI
+	// VideoOutput says how video is shown:
+	//   "auto"  → kitty or sixel graphics if the terminal supports them,
+	//             otherwise an mpv window
+	//   "kitty" → force the kitty graphics protocol in the terminal
+	//   "sixel" → force sixel graphics in the terminal
+	//   "gpu"   → a normal mpv window alongside the TUI
+	//   "tct"   → text-mode video in the terminal (any other mpv --vo value
+	//             works too; "null" disables video)
 	VideoOutput string `json:"video_output"`
 
 	// AudioOnly forces `vid=no`, so mpv never opens a video track. Useful
@@ -31,7 +34,7 @@ func Default() Config {
 	return Config{
 		SubscriptionsPath: filepath.Join(base, "subscriptions.json"),
 		DownloadDir:       filepath.Join(base, "downloads"),
-		VideoOutput:       "gpu",
+		VideoOutput:       "auto",
 		AudioOnly:         false,
 		CookiesPath:       "",
 	}

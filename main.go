@@ -16,7 +16,7 @@ import (
 )
 
 func main() {
-	if _, err := ytdlp.Install(context.TODO(), nil); err != nil {
+	if _, err := ytdlp.Install(context.Background(), nil); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to install yt-dlp: %v\n", err)
 		os.Exit(1)
 	}

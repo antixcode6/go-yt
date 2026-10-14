@@ -33,6 +33,10 @@ func runFakeMPV() {
 			sock = v
 		}
 	}
+	if sock == "" {
+		runFakeTerminalMPV()
+		return
+	}
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		os.Exit(2)
@@ -311,5 +315,315 @@ func TestTidy(t *testing.T) {
 	got := tidy("ERROR: [youtube] x: HTTP Error 403: Forbidden see https://example.com/a?b=c now")
 	if strings.Contains(got, "https://") || !strings.Contains(got, "<url>") || !strings.Contains(got, "stale") {
 		t.Errorf("tidy = %q", got)
+	}
+}
+
+// --- terminal-graphics mode (kitty/sixel) ---
+
+// runFakeTerminalMPV imitates an mpv started for PlayInTerminal: it "draws" by
+// writing to stdout, writes error lines to --log-file, and exits like mpv.
+func runFakeTerminalMPV() {
+	var logPath string
+	cookies := false
+	for _, a := range os.Args[1:] {
+		if v, ok := strings.CutPrefix(a, "--log-file="); ok {
+			logPath = v
+		}
+		if strings.HasPrefix(a, "--ytdl-raw-options=cookies=") {
+			cookies = true
+		}
+	}
+	if rec := os.Getenv("GO_YT_FAKE_RECORD"); rec != "" {
+		f, _ := os.OpenFile(rec, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		_, _ = f.WriteString(strings.Join(os.Args[1:], " ") + "\n")
+		_ = f.Close()
+	}
+	logErr := func(text string) {
+		_ = os.WriteFile(logPath, []byte("[   1.000][v][cplayer] noise\n[   2.000][e][ytdl_hook] ERROR: "+text+"\n"+
+			"[   2.100][e][ytdl_hook] ERROR: [generic] videoplayback?x=1: Unable to download webpage: HTTP Error 403\n"), 0o600)
+	}
+	switch os.Getenv("GO_YT_FAKE_SCENARIO") {
+	case "cookies-break":
+		if cookies {
+			logErr("[youtube] abc: Sign in to confirm you\u2019re not a bot.")
+			os.Exit(2)
+		}
+	case "always-fail":
+		if cookies {
+			logErr("[youtube] abc: Sign in to confirm you\u2019re not a bot.")
+		} else {
+			logErr("[youtube] abc: Video unavailable")
+		}
+		os.Exit(2)
+	case "bad-vo":
+		os.Exit(1)
+	case "ctrl-c":
+		os.Stdout.WriteString("FRAME\n")
+		os.Exit(4)
+	}
+	os.Stdout.WriteString("FRAME\n")
+	os.Exit(0)
+}
+
+type termEnv struct {
+	c      *Client
+	out    *os.File
+	record string
+}
+
+func newTerm(t *testing.T, scenario, cookies string) termEnv {
+	t.Helper()
+	dir := t.TempDir()
+	oldBin := mpvBinary
+	mpvBinary = os.Args[0]
+	t.Cleanup(func() { mpvBinary = oldBin })
+	t.Setenv("GO_YT_FAKE_MPV", "1")
+	t.Setenv("GO_YT_FAKE_SCENARIO", scenario)
+	record := filepath.Join(dir, "runs.txt")
+	t.Setenv("GO_YT_FAKE_RECORD", record)
+
+	c, err := New(filepath.Join(dir, "m.sock"), Options{VideoOutput: "kitty", CookiesPath: cookies})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	out, err := os.Create(filepath.Join(dir, "terminal.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = out.Close() })
+	return termEnv{c: c, out: out, record: record}
+}
+
+func (e termEnv) drawn(t *testing.T) string {
+	t.Helper()
+	b, _ := os.ReadFile(e.out.Name())
+	return string(b)
+}
+
+func (e termEnv) runs(t *testing.T) []string {
+	t.Helper()
+	b, _ := os.ReadFile(e.record)
+	return strings.Split(strings.TrimSpace(string(b)), "\n")
+}
+
+// The bug this guards against: mpv's stdout must be the terminal given to
+// PlayInTerminal, or kitty/sixel frames go nowhere and only audio is heard.
+func TestTerminalMPVDrawsOnTheGivenTerminal(t *testing.T) {
+	e := newTerm(t, "ok", "")
+	if e.c.conn != nil || e.c.proc != nil {
+		t.Fatal("terminal mode must not start a long-lived mpv")
+	}
+	if err := e.c.PlayInTerminal("https://www.youtube.com/watch?v=abc", os.Stdin, e.out); err != nil {
+		t.Fatal(err)
+	}
+	got := e.drawn(t)
+	if !strings.HasPrefix(got, "FRAME\n") {
+		t.Fatalf("mpv's output did not reach the terminal: %q", got)
+	}
+	if !strings.Contains(got[len("FRAME\n"):], kittyDeleteAll) {
+		t.Errorf("leftover kitty images must be deleted after mpv exits: %q", got)
+	}
+	runs := e.runs(t)
+	if len(runs) != 1 {
+		t.Fatalf("want one mpv run, got %v", runs)
+	}
+	for _, want := range []string{"--vo=kitty", "--really-quiet", "--idle=no", "--keep-open=no", "-- https://www.youtube.com/watch?v=abc"} {
+		if !strings.Contains(runs[0], want) {
+			t.Errorf("args lack %q: %s", want, runs[0])
+		}
+	}
+	for _, bad := range []string{"--no-terminal", "--input-ipc-server", "--vo-kitty-cols"} {
+		if strings.Contains(runs[0], bad) {
+			t.Errorf("args must not contain %q: %s", bad, runs[0])
+		}
+	}
+}
+
+func TestTerminalRetriesWithoutCookies(t *testing.T) {
+	e := newTerm(t, "cookies-break", "/x/cookies.txt")
+	if err := e.c.PlayInTerminal("https://www.youtube.com/watch?v=abc", os.Stdin, e.out); err != nil {
+		t.Fatal(err)
+	}
+	runs := e.runs(t)
+	if len(runs) != 2 || !strings.Contains(runs[0], "--ytdl-raw-options=cookies=/x/cookies.txt") ||
+		strings.Contains(runs[1], "cookies") {
+		t.Fatalf("want a run with cookies, then one without: %v", runs)
+	}
+	if got := e.drawn(t); strings.Count(got, "FRAME\n") != 1 {
+		t.Errorf("the video should be drawn exactly once: %q", got)
+	}
+}
+
+func TestTerminalLoadFailureReasons(t *testing.T) {
+	e := newTerm(t, "always-fail", "")
+	err := e.c.PlayInTerminal("u", os.Stdin, e.out)
+	if err == nil || err.Error() != "Could not play this video: [youtube] abc: Video unavailable" {
+		t.Fatalf("got %v", err) // the [generic] hook error must not win
+	}
+	if n := len(e.runs(t)); n != 1 {
+		t.Errorf("no cookies configured, so no retry; got %d runs", n)
+	}
+
+	e = newTerm(t, "always-fail", "/x/cookies.txt")
+	err = e.c.PlayInTerminal("u", os.Stdin, e.out)
+	if err == nil || !strings.Contains(err.Error(), "Without cookies: [youtube] abc: Video unavailable") ||
+		!strings.Contains(err.Error(), "With cookies: [youtube] abc: Sign in to confirm") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestTerminalStartFailureAndCtrlC(t *testing.T) {
+	e := newTerm(t, "bad-vo", "/x/cookies.txt")
+	err := e.c.PlayInTerminal("u", os.Stdin, e.out)
+	if err == nil || !strings.Contains(err.Error(), "mpv failed to start") || !strings.Contains(err.Error(), "--vo=help") {
+		t.Fatalf("got %v", err)
+	}
+	if n := len(e.runs(t)); n != 1 {
+		t.Errorf("a start failure is not a cookie problem; got %d runs", n)
+	}
+
+	e = newTerm(t, "ctrl-c", "")
+	if err := e.c.PlayInTerminal("u", os.Stdin, e.out); err != nil {
+		t.Errorf("Ctrl+C is a normal exit, got %v", err)
+	}
+}
+
+func TestTerminalModeHasNoIPC(t *testing.T) {
+	e := newTerm(t, "ok", "")
+	if e.c.Position() != 0 || e.c.IsIdle() || e.c.MediaTitle() != "" || e.c.Stop() == nil || e.c.SetVolume(5) == nil {
+		t.Error("IPC calls must be harmless no-ops/errors in terminal mode")
+	}
+	if err := e.c.Close(); err != nil {
+		t.Error(err)
+	}
+}
+
+// cleanTermEnv blanks every variable DetectProtocol reads, so tests do not
+// depend on the terminal they run in (a developer's kitty sets KITTY_WINDOW_ID).
+func cleanTermEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{"TERM", "TERM_PROGRAM", "KITTY_WINDOW_ID", "TMUX"} {
+		t.Setenv(k, "")
+	}
+}
+
+func TestDetectProtocol(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want GraphicsProtocol
+	}{
+		{"kitty TERM", map[string]string{"TERM": "xterm-kitty"}, ProtocolKitty},
+		{"kitty with TERM overridden", map[string]string{"TERM": "xterm-256color", "KITTY_WINDOW_ID": "1"}, ProtocolKitty},
+		{"ghostty", map[string]string{"TERM": "xterm-ghostty"}, ProtocolKitty},
+		{"wezterm", map[string]string{"TERM": "xterm-256color", "TERM_PROGRAM": "WezTerm"}, ProtocolKitty},
+		{"foot", map[string]string{"TERM": "foot"}, ProtocolSixel},
+		{"tmux inside kitty", map[string]string{"TERM": "tmux-256color", "KITTY_WINDOW_ID": "1", "TMUX": "/tmp/tmux-1/default,1,0"}, ProtocolNone},
+		{"plain xterm", map[string]string{"TERM": "xterm-256color"}, ProtocolNone},
+	} {
+		cleanTermEnv(t)
+		for k, v := range tc.env {
+			t.Setenv(k, v)
+		}
+		if got := DetectProtocol(); got != tc.want {
+			t.Errorf("%s: DetectProtocol() = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestVideoMode(t *testing.T) {
+	cleanTermEnv(t)
+	t.Setenv("TERM", "xterm-256color")
+	if got := (&Client{videoOutput: "auto"}).VideoMode(); !strings.Contains(got, "no kitty/sixel terminal detected") || !strings.Contains(got, "xterm-256color") {
+		t.Errorf("auto without a graphics terminal: %q", got)
+	}
+	if got := (&Client{videoOutput: "gpu"}).VideoMode(); !strings.Contains(got, "--vo=gpu") || !strings.Contains(got, `"auto"`) {
+		t.Errorf("gpu: %q", got)
+	}
+	if got := (&Client{protocol: ProtocolKitty}).VideoMode(); !strings.Contains(got, "kitty graphics") {
+		t.Errorf("kitty: %q", got)
+	}
+}
+
+func TestResolveProtocol(t *testing.T) {
+	cleanTermEnv(t)
+	t.Setenv("TERM", "xterm-kitty")
+	for _, tc := range []struct {
+		vo    string
+		audio bool
+		want  GraphicsProtocol
+	}{
+		{"auto", false, ProtocolKitty},
+		{"gpu", false, ProtocolNone}, // config wins over detection
+		{"", false, ProtocolNone},
+		{"sixel", false, ProtocolSixel},
+		{"kitty", false, ProtocolKitty},
+		{"auto", true, ProtocolNone},
+	} {
+		if got := ResolveProtocol(tc.vo, tc.audio); got != tc.want {
+			t.Errorf("ResolveProtocol(%q, %v) = %v, want %v", tc.vo, tc.audio, got, tc.want)
+		}
+	}
+	cleanTermEnv(t)
+	t.Setenv("TERM", "foot")
+	if got := ResolveProtocol("auto", false); got != ProtocolSixel {
+		t.Errorf("foot should detect sixel, got %v", got)
+	}
+}
+
+func TestReadLogProblemsAndReason(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mpv.log")
+	log := "[  1.000][v][cplayer] verbose noise\n" +
+		"[  2.000][w][ffmpeg] https: HTTP error 403 Forbidden\n" +
+		"[  2.100][e][stream] Failed to open https://x/y.\n" +
+		"[  3.000][e][ytdl_hook] ERROR: [generic] videoplayback: Unable to download webpage\n"
+	if err := os.WriteFile(path, []byte(log), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lines := readLogProblems(path)
+	if len(lines) != 3 {
+		t.Fatalf("want 3 problem lines, got %v", lines)
+	}
+	// Only a [generic] hook error exists, so the ffmpeg HTTP error is the better reason.
+	if got := failureReason(lines); !strings.Contains(got, "HTTP error 403") {
+		t.Errorf("reason = %q", got)
+	}
+}
+
+func TestKittyArgsShmIsOptIn(t *testing.T) {
+	t.Setenv("SSH_CONNECTION", "")
+	t.Setenv("SSH_TTY", "")
+	t.Setenv("GO_YT_KITTY_SHM", "")
+	if got := strings.Join(terminalArgs(ProtocolKitty), " "); strings.Contains(got, "use-shm") || !strings.Contains(got, "--vo=kitty") {
+		t.Errorf("shm must be off by default: %s", got)
+	}
+	t.Setenv("GO_YT_KITTY_SHM", "1")
+	if got := strings.Join(terminalArgs(ProtocolKitty), " "); !strings.Contains(got, "--vo-kitty-use-shm=yes") {
+		t.Errorf("GO_YT_KITTY_SHM=1 should enable shm: %s", got)
+	}
+	t.Setenv("SSH_CONNECTION", "1.2.3.4 1 5.6.7.8 22")
+	if got := strings.Join(terminalArgs(ProtocolKitty), " "); strings.Contains(got, "use-shm") {
+		t.Errorf("shm must stay off over ssh: %s", got)
+	}
+}
+
+func TestResetTerminalPerProtocol(t *testing.T) {
+	read := func(c *Client) string {
+		f, err := os.Create(filepath.Join(t.TempDir(), "tty"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		c.resetTerminal(f)
+		b, _ := os.ReadFile(f.Name())
+		return string(b)
+	}
+	k := read(&Client{protocol: ProtocolKitty})
+	if strings.Count(k, kittyDeleteAll) != 2 || !strings.Contains(k, "\x1b[?1049h") || !strings.HasSuffix(k, "\x1b[?1049l") {
+		t.Errorf("kitty reset = %q", k)
+	}
+	if got := read(&Client{protocol: ProtocolSixel}); !strings.Contains(got, "\x1b[2J") || strings.Contains(got, "_G") {
+		t.Errorf("sixel reset = %q", got)
 	}
 }
