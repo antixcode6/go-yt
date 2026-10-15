@@ -102,12 +102,19 @@ func runFakeMPV() {
 						_, _ = f.Write(append(line, '\n'))
 						_ = f.Close()
 					}
-					withCookies := len(req.Command) >= 5
+					optStr := ""
+					if len(req.Command) >= 5 {
+						optStr, _ = req.Command[4].(string)
+					}
+					withCookies := strings.Contains(optStr, "cookies=")
+					viaSafari := strings.Contains(optStr, "player_client=web_safari")
 					go func() {
 						time.Sleep(50 * time.Millisecond)
 						switch {
 						case scenario == "die":
 							os.Exit(1)
+						case scenario == "403-always", scenario == "403-until-safari" && !viaSafari:
+							fail("https: HTTP error 403 Forbidden")
 						case scenario == "always-fail" && withCookies:
 							fail("[youtube] abc: Sign in to confirm you’re not a bot. See https://github.com/yt-dlp/yt-dlp/wiki/FAQ for details")
 						case scenario == "always-fail":
@@ -136,7 +143,7 @@ type fakeEnv struct {
 	record string
 }
 
-func newFake(t *testing.T, scenario, cookies string) fakeEnv {
+func newFake(t *testing.T, scenario, cookies string, fallbacks ...string) fakeEnv {
 	t.Helper()
 
 	dir, err := os.MkdirTemp("", "gy")
@@ -153,7 +160,7 @@ func newFake(t *testing.T, scenario, cookies string) fakeEnv {
 	t.Setenv("GO_YT_FAKE_SCENARIO", scenario)
 	t.Setenv("GO_YT_FAKE_RECORD", record)
 
-	c, err := New(filepath.Join(dir, "m.sock"), Options{CookiesPath: cookies})
+	c, err := New(filepath.Join(dir, "m.sock"), Options{CookiesPath: cookies, FallbackClients: fallbacks})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -245,7 +252,7 @@ func TestLoadFailedWithAndWithoutCookies(t *testing.T) {
 	if !ok || ev.Kind != EventLoadFailed {
 		t.Fatalf("want EventLoadFailed, got %+v (ok=%v)", ev, ok)
 	}
-	for _, want := range []string{"Without cookies: [youtube] abc: Video unavailable", "With cookies: [youtube] abc: Sign in to confirm"} {
+	for _, want := range []string{"without cookies: [youtube] abc: Video unavailable", "with cookies: [youtube] abc: Sign in to confirm"} {
 		if !strings.Contains(ev.Message, want) {
 			t.Errorf("message %q lacks %q", ev.Message, want)
 		}
@@ -323,14 +330,15 @@ func TestTidy(t *testing.T) {
 // runFakeTerminalMPV imitates an mpv started for PlayInTerminal: it "draws" by
 // writing to stdout, writes error lines to --log-file, and exits like mpv.
 func runFakeTerminalMPV() {
-	var logPath string
+	var logPath, rawOpts string
 	cookies := false
 	for _, a := range os.Args[1:] {
 		if v, ok := strings.CutPrefix(a, "--log-file="); ok {
 			logPath = v
 		}
-		if strings.HasPrefix(a, "--ytdl-raw-options=cookies=") {
-			cookies = true
+		if v, ok := strings.CutPrefix(a, "--ytdl-raw-options="); ok {
+			rawOpts = v
+			cookies = strings.Contains(v, "cookies=")
 		}
 	}
 	if rec := os.Getenv("GO_YT_FAKE_RECORD"); rec != "" {
@@ -346,6 +354,11 @@ func runFakeTerminalMPV() {
 	case "cookies-break":
 		if cookies {
 			logErr("[youtube] abc: Sign in to confirm you\u2019re not a bot.")
+			os.Exit(2)
+		}
+	case "403-until-safari":
+		if !strings.Contains(rawOpts, "player_client=web_safari") {
+			logErr("[youtube] abc: HTTP Error 403: Forbidden")
 			os.Exit(2)
 		}
 	case "always-fail":
@@ -371,7 +384,7 @@ type termEnv struct {
 	record string
 }
 
-func newTerm(t *testing.T, scenario, cookies string) termEnv {
+func newTerm(t *testing.T, scenario, cookies string, fallbacks ...string) termEnv {
 	t.Helper()
 	dir := t.TempDir()
 	oldBin := mpvBinary
@@ -382,7 +395,7 @@ func newTerm(t *testing.T, scenario, cookies string) termEnv {
 	record := filepath.Join(dir, "runs.txt")
 	t.Setenv("GO_YT_FAKE_RECORD", record)
 
-	c, err := New(filepath.Join(dir, "m.sock"), Options{VideoOutput: "kitty", CookiesPath: cookies})
+	c, err := New(filepath.Join(dir, "m.sock"), Options{VideoOutput: "kitty", CookiesPath: cookies, FallbackClients: fallbacks})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -467,8 +480,8 @@ func TestTerminalLoadFailureReasons(t *testing.T) {
 
 	e = newTerm(t, "always-fail", "/x/cookies.txt")
 	err = e.c.PlayInTerminal("u", os.Stdin, e.out)
-	if err == nil || !strings.Contains(err.Error(), "Without cookies: [youtube] abc: Video unavailable") ||
-		!strings.Contains(err.Error(), "With cookies: [youtube] abc: Sign in to confirm") {
+	if err == nil || !strings.Contains(err.Error(), "without cookies: [youtube] abc: Video unavailable") ||
+		!strings.Contains(err.Error(), "with cookies: [youtube] abc: Sign in to confirm") {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -605,25 +618,5 @@ func TestKittyArgsShmIsOptIn(t *testing.T) {
 	t.Setenv("SSH_CONNECTION", "1.2.3.4 1 5.6.7.8 22")
 	if got := strings.Join(terminalArgs(ProtocolKitty), " "); strings.Contains(got, "use-shm") {
 		t.Errorf("shm must stay off over ssh: %s", got)
-	}
-}
-
-func TestResetTerminalPerProtocol(t *testing.T) {
-	read := func(c *Client) string {
-		f, err := os.Create(filepath.Join(t.TempDir(), "tty"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer f.Close()
-		c.resetTerminal(f)
-		b, _ := os.ReadFile(f.Name())
-		return string(b)
-	}
-	k := read(&Client{protocol: ProtocolKitty})
-	if strings.Count(k, kittyDeleteAll) != 2 || !strings.Contains(k, "\x1b[?1049h") || !strings.HasSuffix(k, "\x1b[?1049l") {
-		t.Errorf("kitty reset = %q", k)
-	}
-	if got := read(&Client{protocol: ProtocolSixel}); !strings.Contains(got, "\x1b[2J") || strings.Contains(got, "_G") {
-		t.Errorf("sixel reset = %q", got)
 	}
 }

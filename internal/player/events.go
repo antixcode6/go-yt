@@ -46,11 +46,10 @@ func (c *Client) emit(ev Event) {
 
 // loadState tracks the most recent Play call.
 type loadState struct {
-	url         string
-	withCookies bool   // this attempt used the cookies file
-	retried     bool   // a cookie-less retry has been started
-	loaded      bool   // mpv emitted file-loaded for this attempt
-	firstErr    string // why the attempt with cookies failed
+	url     string
+	attempt int       // index into plan() of the attempt in progress
+	loaded  bool      // mpv emitted file-loaded for this attempt
+	failed  []failure // attempts that already failed
 }
 
 type logLine struct {
@@ -106,51 +105,48 @@ func (c *Client) markLoaded() {
 	c.mu.Unlock()
 }
 
-// endFileError decides what to do when mpv reports that a file failed: retry
-// once without cookies, or tell the UI.
+// endFileError decides what to do when mpv reports that a file failed: try
+// the next way of loading it, or tell the UI.
 func (c *Client) endFileError(reason string) {
 	c.mu.Lock()
 	cur := c.cur
-	retry := cur.url != "" && cur.withCookies && !cur.loaded && !cur.retried
+	if cur.url == "" {
+		c.mu.Unlock()
+		return // not something Play started
+	}
+	plan := c.plan()
+	if cur.attempt >= len(plan) {
+		cur.attempt = len(plan) - 1
+	}
+	cur.failed = append(cur.failed, failure{plan[cur.attempt].label, reason})
+	retry := !cur.loaded && c.moreToTry(plan, cur.attempt, reason)
 	if retry {
-		c.cur.retried = true
-		c.cur.withCookies = false
-		c.cur.firstErr = reason
+		c.cur = loadState{url: cur.url, attempt: cur.attempt + 1, failed: cur.failed}
 	} else {
 		c.cur = loadState{}
 	}
 	c.mu.Unlock()
 
-	if cur.url == "" {
-		return // not something Play started
-	}
-
 	if retry {
+		next := plan[cur.attempt+1]
 		c.emit(Event{
 			Kind:    EventRetrying,
 			URL:     cur.url,
-			Message: "Playback failed with cookies (" + reason + "); retrying without them...",
+			Message: fmt.Sprintf("%s failed (%s); trying %s...", upperFirst(plan[cur.attempt].label), reason, next.label),
 		})
-		if err := c.call("loadfile", cur.url, "replace"); err != nil {
+		if err := c.loadWith(cur.url, next); err != nil {
 			c.emit(Event{
 				Kind:    EventLoadFailed,
 				URL:     cur.url,
-				Message: "Retry without cookies failed: " + err.Error(),
+				Message: "Retry (" + next.label + ") failed: " + err.Error(),
 			})
 		}
 		return
 	}
 
-	var msg string
-	switch {
-	case cur.loaded:
+	msg := summarize(cur.failed)
+	if cur.loaded {
 		msg = "Playback stopped: " + reason
-	case cur.retried && cur.firstErr == reason:
-		msg = "Could not play this video, with or without cookies: " + reason
-	case cur.retried:
-		msg = fmt.Sprintf("Could not play this video. Without cookies: %s. With cookies: %s.", reason, cur.firstErr)
-	default:
-		msg = "Could not play this video: " + reason
 	}
 	c.emit(Event{Kind: EventLoadFailed, URL: cur.url, Message: msg})
 }

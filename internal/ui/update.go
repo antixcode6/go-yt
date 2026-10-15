@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"os"
@@ -27,6 +28,7 @@ type (
 type discoverVideosMsg struct {
 	videos []*feed.Video
 	title  string
+	note   string // non-fatal: some entries were skipped
 }
 
 type subscriptionAddedMsg struct {
@@ -114,12 +116,14 @@ func fetchSearchResultsCmd(fc *feed.Client, feedURL, limit string) tea.Cmd {
 	return func() tea.Msg {
 		// ytsearch is a yt-dlp pseudo-URL. The number prefix limits results.
 		videos, err := fc.FetchHomeFeed(context.Background(), feedURL, limit)
+		note, err := partialNote(err)
 		if err != nil {
 			return errMsg(err)
 		}
 		return discoverVideosMsg{
 			videos: videos,
 			title:  feedURL,
+			note:   note,
 		}
 	}
 }
@@ -127,11 +131,22 @@ func fetchSearchResultsCmd(fc *feed.Client, feedURL, limit string) tea.Cmd {
 func fetchFeedCmd(fc *feed.Client, feedURL, limit string) tea.Cmd {
 	return func() tea.Msg {
 		videos, err := fc.FetchHomeFeed(context.Background(), feedURL, limit)
+		note, err := partialNote(err)
 		if err != nil {
 			return errMsg(err)
 		}
-		return discoverVideosMsg{videos: videos}
+		return discoverVideosMsg{videos: videos, note: note}
 	}
+}
+
+// partialNote turns a feed.PartialError (videos loaded, some entries skipped)
+// into a status note; any other error is returned unchanged.
+func partialNote(err error) (string, error) {
+	var pe *feed.PartialError
+	if errors.As(err, &pe) {
+		return pe.Error(), nil
+	}
+	return "", err
 }
 
 // Update handles messages and key presses.
@@ -163,7 +178,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.screen = ScreenVideos
 		m.cursor = 0
 		m.offset = 0
-		m.statusMsg = ""
+		m.statusMsg = msg.note
 		m.err = nil
 		return m, nil
 
