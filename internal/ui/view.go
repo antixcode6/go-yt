@@ -106,48 +106,24 @@ func (m Model) viewVideos() string {
 	}
 
 	var b strings.Builder
-	if m.selectedSub < len(m.subs) {
+	if m.videoListTitle != "" {
+		b.WriteString(titleStyle.Render(m.videoListTitle))
+	} else if m.selectedSub < len(m.subs) {
 		b.WriteString(titleStyle.Render(m.subs[m.selectedSub].Title))
-		b.WriteByte('\n')
 	} else {
 		b.WriteString(titleStyle.Render("Videos"))
-		b.WriteByte('\n')
 	}
+	b.WriteByte('\n')
 
 	if len(m.videos) == 0 {
 		b.WriteString(dimStyle.Render("No videos."))
 		return b.String()
 	}
 
-	visible := m.visibleRows()
-	end := m.offset + visible
-	if end > len(m.videos) {
-		end = len(m.videos)
+	if m.showChannel {
+		return m.renderMixedVideoList(&b)
 	}
-
-	for i := m.offset; i < end; i++ {
-		v := m.videos[i]
-		dateStr := ""
-		if !v.Published.IsZero() {
-			dateStr = v.Published.Format("2006-01-02") + "  "
-		}
-		line := dateStr + v.Title
-		if i == m.cursor {
-			b.WriteString(selectedStyle.Render("▸ " + line))
-			b.WriteByte('\n')
-		} else {
-			b.WriteString("  ")
-			b.WriteString(line)
-			b.WriteByte('\n')
-		}
-	}
-
-	if len(m.videos) > visible {
-		b.WriteByte('\n')
-		b.WriteString(dimStyle.Render(fmt.Sprintf(
-			"  %d–%d of %d", m.offset+1, end, len(m.videos))))
-	}
-	return b.String()
+	return m.renderChannelVideoList(&b)
 }
 
 func (m Model) viewInputModal() string {

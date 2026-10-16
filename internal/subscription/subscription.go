@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"sync"
 
 	"github.com/antixcode6/go-yt/internal/feed"
+	"golang.org/x/text/collate"
+	"golang.org/x/text/language"
 )
 
 // Subscription ties a channel to its cached videos.
@@ -128,6 +131,10 @@ func (s *Store) List() []*Subscription {
 	for _, sub := range s.subs {
 		out = append(out, sub)
 	}
+	c := collate.New(language.English)
+	sort.Slice(out, func(i, j int) bool {
+		return c.CompareString(out[i].Title, out[j].Title) < 0
+	})
 	return out
 }
 

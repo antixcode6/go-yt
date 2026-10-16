@@ -67,11 +67,7 @@ func terminalArgs(p GraphicsProtocol) []string {
 
 // PlayInTerminal plays one video with its own mpv, attached to the terminal
 // given by in/out (what tea.Exec passes to an ExecCommand), and returns when
-// mpv exits. mpv draws the picture on out and reads keys (space, arrows, q)
-// from in, so nothing else may use the terminal meanwhile.
-//
-// If a cookies file is configured and the load fails, it plays again without
-// it. A load failure is returned as an error holding yt-dlp's reason.
+// mpv exits.
 func (c *Client) PlayInTerminal(url string, in io.Reader, out io.Writer) error {
 	if !c.Terminal() {
 		return errors.New("PlayInTerminal needs a kitty or sixel video_output")
@@ -91,22 +87,22 @@ func (c *Client) PlayInTerminal(url string, in io.Reader, out io.Writer) error {
 		defer os.Remove(logPath)
 	}
 
-	r := c.runMPV(url, c.cookies, logPath, stdin, stdout)
-	if r.err != nil || r.reason == "" {
-		return r.err
+	plan := c.plan()
+	var failed []failure
+	for i, a := range plan {
+		r := c.runMPV(url, a, logPath, stdin, stdout)
+		if r.err != nil {
+			return r.err
+		}
+		if r.reason == "" {
+			return nil
+		}
+		failed = append(failed, failure{a.label, r.reason})
+		if !r.loadFailure || !c.moreToTry(plan, i, r.reason) {
+			break
+		}
 	}
-	if c.cookies == "" || !r.loadFailure {
-		return errors.New("Could not play this video: " + r.reason)
-	}
-
-	plain := c.runMPV(url, "", logPath, stdin, stdout)
-	switch {
-	case plain.err != nil || plain.reason == "":
-		return plain.err
-	case plain.reason == r.reason:
-		return errors.New("Could not play this video, with or without cookies: " + r.reason)
-	}
-	return fmt.Errorf("Could not play this video. Without cookies: %s. With cookies: %s.", plain.reason, r.reason)
+	return errors.New(summarize(failed))
 }
 
 type mpvRun struct {
@@ -115,11 +111,11 @@ type mpvRun struct {
 	loadFailure bool   // the video itself would not load (worth retrying)
 }
 
-func (c *Client) runMPV(url, cookies, logPath string, stdin, stdout *os.File) mpvRun {
+func (c *Client) runMPV(url string, a attempt, logPath string, stdin, stdout *os.File) mpvRun {
 	args := append([]string(nil), c.termArgs...)
 	args = append(args, "--log-file="+logPath)
-	if cookies != "" {
-		args = append(args, "--ytdl-raw-options=cookies="+cookies)
+	if opt := a.rawOptions(); opt != "" {
+		args = append(args, "--ytdl-raw-options="+opt)
 	}
 	args = append(args, "--", url)
 

@@ -24,12 +24,17 @@ type Options struct {
 	VideoOutput string
 	AudioOnly   bool
 	CookiesPath string
+
+	// FallbackClients are yt-dlp YouTube player clients (web_safari,
+	// android_vr, ...) tried one by one when YouTube withholds the stream.
+	FallbackClients []string
 }
 
 type Client struct {
-	conn    *mpvipc.Connection
-	proc    *exec.Cmd
-	cookies string
+	conn      *mpvipc.Connection
+	proc      *exec.Cmd
+	cookies   string
+	fallbacks []string // yt-dlp player clients to fall back to
 
 	protocol    GraphicsProtocol // terminal graphics in use, or ProtocolNone
 	videoOutput string           // video_output from the config
@@ -58,10 +63,17 @@ func New(socketPath string, opts Options) (*Client, error) {
 		return nil, fmt.Errorf("cookies path %q contains ',' or '%%', which mpv's option syntax cannot carry; move the file", opts.CookiesPath)
 	}
 
+	for _, name := range opts.FallbackClients {
+		if !clientNameRe.MatchString(name) {
+			return nil, fmt.Errorf("ytdlp_fallback_clients: %q is not a yt-dlp player client name (use names like web_safari)", name)
+		}
+	}
+
 	_ = os.Remove(socketPath)
 
 	c := &Client{
 		cookies:     opts.CookiesPath,
+		fallbacks:   opts.FallbackClients,
 		protocol:    ResolveProtocol(opts.VideoOutput, opts.AudioOnly),
 		videoOutput: opts.VideoOutput,
 		audioOnly:   opts.AudioOnly,
@@ -174,7 +186,7 @@ func exitStatus(err error) string {
 // call sends an mpv command and waits for the response. Unlike blang/mpv,
 // mpvipc has no hardcoded timeout — Call blocks until mpv replies. This is
 // why large videos no longer fail with "timeout while receiving response".
-func (c *Client) call(args ...interface{}) error {
+func (c *Client) call(args ...any) error {
 	if c.conn == nil {
 		return errNoIPC
 	}
@@ -225,18 +237,14 @@ func (c *Client) getBool(property string) bool {
 // yt-dlp, so a nil return only means the request was accepted; failures
 // arrive later on Events().
 //
-// If a cookies file is configured it is used for this attempt only. When the
-// load fails, the client retries once without cookies (see Event).
+// When the load fails, the client tries again the next way (without cookies,
+// then each fallback client) and reports progress on Events().
 func (c *Client) Play(ctx context.Context, watchURL string) error {
 	c.mu.Lock()
-	c.cur = loadState{url: watchURL, withCookies: c.cookies != ""}
+	c.cur = loadState{url: watchURL}
 	c.mu.Unlock()
 
-	if c.cookies != "" {
-		return c.call("loadfile", watchURL, "replace", -1,
-			"ytdl-raw-options=cookies="+c.cookies)
-	}
-	return c.call("loadfile", watchURL, "replace")
+	return c.loadWith(watchURL, c.plan()[0])
 }
 
 func (c *Client) Stop() error        { return c.call("stop") }

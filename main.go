@@ -34,6 +34,8 @@ func main() {
 		VideoOutput: cfg.VideoOutput,
 		AudioOnly:   cfg.AudioOnly,
 		CookiesPath: cfg.CookiesPath,
+
+		FallbackClients: cfg.YtdlpFallbackClients,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to start mpv: %v\n", err)

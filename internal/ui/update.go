@@ -2,8 +2,9 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,18 +25,10 @@ type (
 	errMsg          error
 )
 
-type importCompletedMsg struct {
-	Added   int
-	Skipped int
-}
-
-type importErrMsg struct {
-	err error
-}
-
 type discoverVideosMsg struct {
 	videos []*feed.Video
 	title  string
+	note   string // non-fatal: some entries were skipped
 }
 
 type subscriptionAddedMsg struct {
@@ -123,12 +116,14 @@ func fetchSearchResultsCmd(fc *feed.Client, feedURL, limit string) tea.Cmd {
 	return func() tea.Msg {
 		// ytsearch is a yt-dlp pseudo-URL. The number prefix limits results.
 		videos, err := fc.FetchHomeFeed(context.Background(), feedURL, limit)
+		note, err := partialNote(err)
 		if err != nil {
 			return errMsg(err)
 		}
 		return discoverVideosMsg{
 			videos: videos,
 			title:  feedURL,
+			note:   note,
 		}
 	}
 }
@@ -136,11 +131,22 @@ func fetchSearchResultsCmd(fc *feed.Client, feedURL, limit string) tea.Cmd {
 func fetchFeedCmd(fc *feed.Client, feedURL, limit string) tea.Cmd {
 	return func() tea.Msg {
 		videos, err := fc.FetchHomeFeed(context.Background(), feedURL, limit)
+		note, err := partialNote(err)
 		if err != nil {
 			return errMsg(err)
 		}
-		return discoverVideosMsg{videos: videos}
+		return discoverVideosMsg{videos: videos, note: note}
 	}
+}
+
+// partialNote turns a feed.PartialError (videos loaded, some entries skipped)
+// into a status note; any other error is returned unchanged.
+func partialNote(err error) (string, error) {
+	var pe *feed.PartialError
+	if errors.As(err, &pe) {
+		return pe.Error(), nil
+	}
+	return "", err
 }
 
 // Update handles messages and key presses.
@@ -155,10 +161,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case videosLoadedMsg:
+		m.loading = false
 		m.videos = msg
+		m.showChannel = false // single-channel view
 		m.screen = ScreenVideos
 		m.cursor = 0
+		m.offset = 0
 		m.statusMsg = ""
+		m.err = nil
+		return m, nil
+
+	case discoverVideosMsg:
+		m.loading = false
+		m.videos = msg.videos
+		m.showChannel = true // mixed-channel view
+		m.screen = ScreenVideos
+		m.cursor = 0
+		m.offset = 0
+		m.statusMsg = msg.note
+		m.err = nil
 		return m, nil
 
 	case playStartedMsg:
@@ -234,15 +255,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, loadSubsCmd(m.store)
 
-	case discoverVideosMsg:
-		m.loading = false
-		m.videos = msg.videos
-		m.screen = ScreenVideos
-		m.cursor = 0
-		m.statusMsg = ""
-		m.err = nil
-		return m, nil
-
 	case tickMsg:
 		if m.screen != ScreenPlayer {
 			return m, nil
@@ -316,7 +328,7 @@ func (m *Model) clampCursor() {
 	}
 
 	// Scroll the window to keep the cursor visible.
-	visible := m.visibleRows()
+	visible := m.visibleItems()
 	switch {
 	case m.cursor < m.offset:
 		m.offset = m.cursor
@@ -338,8 +350,6 @@ func (m *Model) clampCursor() {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	log.Printf("key=%q loading=%v", msg.String(), m.loading)
-	log.Printf("screen=%d inputMode=%d cursor=%d", m.screen, m.inputMode, m.cursor)
 	if msg.String() == "ctrl+c" {
 		return m, tea.Quit
 	}
@@ -378,21 +388,23 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.cursor > 0 {
 			m.cursor--
 		}
+		m.clampCursor()
 		return m, nil
 
 	case "down", "j":
 		if m.cursor < m.maxCursor() {
 			m.cursor++
 		}
+		m.clampCursor()
 		return m, nil
 
 	case "pgdown", "ctrl+d":
-		m.cursor += m.visibleRows()
+		m.cursor += m.visibleItems()
 		m.clampCursor()
 		return m, nil
 
 	case "pgup", "ctrl+u":
-		m.cursor -= m.visibleRows()
+		m.cursor -= m.visibleItems()
 		m.clampCursor()
 		return m, nil
 
@@ -409,8 +421,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		if m.screen == ScreenSubscriptions && m.cursor < len(m.subs) {
 			sub := m.subs[m.cursor]
+			m.selectedSub = m.cursor
 			fc := feed.NewClient(m.cfg.CookiesPath)
-			return m, loadVideosCmd(fc, sub.ChannelID)
+			m.loading = true
+			m.loadingMsg = pickLoadFlavor(sub.Title)
+			m.err = nil
+			return m, tea.Batch(loadVideosCmd(fc, sub.ChannelID), m.spinner.Tick)
 		}
 
 		if m.screen == ScreenVideos && m.cursor < len(m.videos) {
@@ -428,17 +444,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			switch selected {
 			case "Subscriptions Feed (Personalized)":
 				m.loading = true
-				m.loadingMsg = "Loading subscriptions feed…"
-				return m, tea.Batch(fetchFeedCmd(fc, ":ytsubs", "20"), m.spinner.Tick)
+				m.loadingMsg = pickLoadFlavor("Loading subscriptions feed…")
+				m.videoListTitle = "Subscriptions Feed"
+				m.showChannel = true
+				return m, tea.Batch(fetchFeedCmd(fc, ":ytsubs", ":20"), m.spinner.Tick)
 			case "Watch History (Personalized)":
 				m.loading = true
-				m.loadingMsg = "Loading watch history…"
-				return m, tea.Batch(fetchFeedCmd(fc, ":ythistory", "20"), m.spinner.Tick)
+				m.loadingMsg = "Loading watch history…" // uses slice logic, limit = 20 returns index 20, limit = :20 returns up to index 20
+				return m, tea.Batch(fetchFeedCmd(fc, ":ythistory", ":20"), m.spinner.Tick)
 			case "Search YouTube":
 				return m, m.openInput(inputSearch)
 			case "Local Recommendations":
 				m.loading = true
-				m.loadingMsg = "Building local recommendations…"
+				m.loadingMsg = pickLoadFlavor("Building local recommendations…")
 				return m, m.fetchLocalRecommendationsCmd()
 			}
 			return m, nil
@@ -560,10 +578,16 @@ func (m Model) handleInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case inputSearch:
 			m.screen = ScreenVideos
 			m.cursor = 0
-			m.statusMsg = "Searching for \"" + raw + "\"…"
+			m.offset = 0
+			m.statusMsg = ""
 			m.err = nil
+			m.loading = true
+			m.loadingMsg = pickLoadFlavor("Searching for " + raw)
 			fc := feed.NewClient(m.cfg.CookiesPath)
-			return m, fetchSearchResultsCmd(fc, raw, "20")
+			return m, tea.Batch(
+				fetchSearchResultsCmd(fc, raw, ":20"),
+				m.spinner.Tick,
+			)
 
 		case inputImportSubs:
 			path := expandHome(raw) // ← use raw, not m.input.Value()
@@ -708,4 +732,48 @@ func (m Model) visibleRows() int {
 		return 3
 	}
 	return n
+}
+
+// loadFlavorLines are shown alongside the spinner while a fetch is in
+// progress. Picked once per load so the message is stable while the user
+// waits, but varies across loads.
+var loadFlavorLines = []string{
+	"Tuning the antenna…",
+	"Asking YouTube nicely…",
+	"Warming up the tubes…",
+	"Reassembling the packets…",
+	"Waking up the hamsters…",
+	"Polishing the pixels…",
+	"Paging the CDN…",
+}
+
+// pickLoadFlavor returns a random flavor line, optionally prefixed with the
+// thing being loaded. Pass an empty string for a context-free message.
+func pickLoadFlavor(context string) string {
+	line := loadFlavorLines[rand.IntN(len(loadFlavorLines))]
+	if context != "" {
+		return context + " — " + line
+	}
+	return line
+}
+
+// truncate returns s shortened to at most n runes, with an ellipsis if it
+// was cut. Rune-aware so multi-byte characters don't produce invalid UTF-8.
+func truncate(s string, n int) string {
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n-1]) + "…"
+}
+
+func (m Model) visibleItems() int {
+	rows := m.visibleRows()
+	if m.screen == ScreenVideos && m.showChannel {
+		rows = rows / 2
+	}
+	if rows < 1 {
+		return 1
+	}
+	return rows
 }

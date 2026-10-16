@@ -26,6 +26,12 @@ type Config struct {
 	AudioOnly bool `json:"audio_only"`
 
 	CookiesPath string `json:"cookies_path"`
+
+	// YtdlpFallbackClients are yt-dlp YouTube player clients tried in order
+	// when a video will not load (YouTube sometimes withholds the normal
+	// stream from a client or account; see yt-dlp issue 12482). Empty turns
+	// the fallback off.
+	YtdlpFallbackClients []string `json:"ytdlp_fallback_clients"`
 }
 
 func Default() Config {
@@ -37,6 +43,8 @@ func Default() Config {
 		VideoOutput:       "auto",
 		AudioOnly:         false,
 		CookiesPath:       "",
+
+		YtdlpFallbackClients: []string{"web_safari", "android_vr"},
 	}
 }
 

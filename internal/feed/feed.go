@@ -111,7 +111,7 @@ func (c *Client) fetchViaYtdlp(ctx context.Context, channelID string) ([]*Video,
 
 	result, err := c.withCookies().
 		FlatPlaylist().
-		PlaylistItems("20").
+		PlaylistItems(":20").
 		ExtractorArgs("youtubetab:approximate_date").
 		PrintJSON().
 		SkipDownload().
@@ -167,7 +167,49 @@ func (c *Client) resolveChannelName(ctx context.Context, channelURL string) stri
 	return strings.TrimSpace(result.Stdout)
 }
 
+// PartialError is returned by FetchHomeFeed together with the videos that did
+// load, when yt-dlp skipped some entries (an upcoming live event, a private or
+// removed video) and so exited with status 1. Callers should show the videos
+// and surface the note, not treat it as a failed fetch.
+type PartialError struct {
+	Skipped []string // one yt-dlp error message per skipped entry
+}
+
+func (e *PartialError) Error() string {
+	switch len(e.Skipped) {
+	case 0:
+		return "yt-dlp skipped some videos"
+	case 1:
+		return "Skipped 1 video: " + e.Skipped[0]
+	}
+	return fmt.Sprintf("Skipped %d videos (first: %s)", len(e.Skipped), e.Skipped[0])
+}
+
+// skippedEntries returns yt-dlp's per-video ERROR lines, without the
+// "ERROR: [youtube] " prefix.
+func skippedEntries(stderr string) []string {
+	var out []string
+	for _, line := range strings.Split(stderr, "\n") {
+		line = strings.TrimSpace(line)
+		rest, ok := strings.CutPrefix(line, "ERROR:")
+		if !ok {
+			continue
+		}
+		rest = strings.TrimSpace(rest)
+		if after, ok := strings.CutPrefix(rest, "[youtube]"); ok {
+			rest = strings.TrimSpace(after)
+		}
+		if rest != "" {
+			out = append(out, rest)
+		}
+	}
+	return out
+}
+
 // FetchHomeFeed fetches videos from a personalized feed (e.g., :ytsubs, :ytrec).
+//
+// yt-dlp exits 1 if any single entry fails, yet it still prints every entry
+// that worked. In that case the videos are returned with a *PartialError.
 func (c *Client) FetchHomeFeed(ctx context.Context, feedURL, limit string) ([]*Video, error) {
 	// For personalized feeds, we must use --no-flat-playlist to get full metadata.
 	// This is slower but necessary for a good user experience.
@@ -179,13 +221,19 @@ func (c *Client) FetchHomeFeed(ctx context.Context, feedURL, limit string) ([]*V
 		PrintJSON().
 		SkipDownload().
 		Run(ctx, feedURL)
+
+	var partial *PartialError
 	if err != nil {
-		return nil, fmt.Errorf("yt-dlp feed fetch %s: %w", feedURL, err)
+		_, ok := ytdlp.IsExitCodeError(err)
+		if !ok || result == nil || result.ExitCode != 1 {
+			return nil, fmt.Errorf("yt-dlp feed fetch %s: %w", feedURL, err)
+		}
+		partial = &PartialError{Skipped: skippedEntries(result.Stderr)}
 	}
 
-	infos, err := result.GetExtractedInfo()
-	if err != nil {
-		return nil, err
+	infos, perr := result.GetExtractedInfo()
+	if perr != nil {
+		return nil, perr
 	}
 
 	videos := make([]*Video, 0, len(infos))
@@ -193,8 +241,21 @@ func (c *Client) FetchHomeFeed(ctx context.Context, feedURL, limit string) ([]*V
 		if info.ID == "" {
 			continue
 		}
+		v := &Video{ID: info.ID, URL: "https://www.youtube.com/watch?v=" + info.ID}
+		if info.Title != nil {
+			v.Title = *info.Title
+		}
+		if info.Channel != nil {
+			v.ChannelName = *info.Channel
+		}
+		videos = append(videos, v)
+	}
 
-		videos = append(videos, &Video{ID: info.ID, Title: *info.Title, URL: "https://www.youtube.com/watch?v=" + info.ID /* ... */})
+	if partial != nil {
+		if len(videos) == 0 {
+			return nil, fmt.Errorf("yt-dlp feed fetch %s: %w", feedURL, err)
+		}
+		return videos, partial
 	}
 	return videos, nil
 }

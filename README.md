@@ -56,6 +56,7 @@ The app creates a default config on first run at
 |---|---|
 | `video_output` | `auto` uses kitty or sixel graphics when your terminal supports them, else an mpv window. `kitty` / `sixel` force one. Any other value is passed to mpv as `--vo` (`gpu` window, `tct` text, `null` no video). |
 | `audio_only` | Adds `--vid=no` to mpv. Pair with `video_output: "null"` for a music-player mode. |
+| `ytdlp_fallback_clients` | yt-dlp YouTube player clients tried in order when a video will not load (default `["web_safari", "android_vr"]`; `[]` turns it off). Works around YouTube withholding streams from some clients/accounts ([yt-dlp #12482](https://github.com/yt-dlp/yt-dlp/issues/12482)). |
 | `cookies_path` | Path to a Netscape-format `cookies.txt`. Required for personalized feeds, subscriptions, and history. |
 
 ### Cookies
