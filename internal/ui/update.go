@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -73,12 +74,14 @@ func loadSubsCmd(store *subscription.Store) tea.Cmd {
 }
 
 // loadVideosCmd fetches videos for a given channel ID.
-func loadVideosCmd(fc *feed.Client, channelID string) tea.Cmd {
+func loadVideosCmd(fc *feed.Client, store *subscription.Store, channelID string) tea.Cmd {
 	return func() tea.Msg {
-		ctx := context.Background()
-		_, videos, err := fc.FetchChannel(ctx, channelID)
+		_, videos, err := fc.FetchChannel(context.Background(), channelID)
 		if err != nil {
 			return errMsg(err)
+		}
+		if err := store.SetVideos(channelID, videos); err != nil {
+			log.Println("save subs:", err) // drop this if you'd rather not log
 		}
 		return videosLoadedMsg(videos)
 	}
@@ -426,7 +429,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.loading = true
 			m.loadingMsg = pickLoadFlavor(sub.Title)
 			m.err = nil
-			return m, tea.Batch(loadVideosCmd(fc, sub.ChannelID), m.spinner.Tick)
+			return m, tea.Batch(loadVideosCmd(fc, m.store, sub.ChannelID), m.spinner.Tick)
 		}
 
 		if m.screen == ScreenVideos && m.cursor < len(m.videos) {

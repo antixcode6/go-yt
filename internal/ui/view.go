@@ -81,7 +81,11 @@ func (m Model) viewSubscriptions() string {
 
 	for i := m.offset; i < end; i++ {
 		sub := m.subs[i]
-		line := fmt.Sprintf("%-40s  %d videos", sub.Title, len(sub.Videos))
+		count := "-"
+		if sub.Videos != nil {
+			count = fmt.Sprintf("%d", len(sub.Videos))
+		}
+		line := fmt.Sprintf("%-40s  %s videos", sub.Title, count)
 		if i == m.cursor {
 			b.WriteString(selectedStyle.Render("▸ " + line))
 			b.WriteByte('\n')
