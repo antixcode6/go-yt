@@ -161,6 +161,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case subsLoadedMsg:
 		m.subs = msg
+		m.loading = false
+		m.refreshing = false
 		return m, nil
 
 	case videosLoadedMsg:
@@ -199,6 +201,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case errMsg:
 		m.loading = false
+		m.refreshing = false
 		m.err = msg
 		m.statusMsg = ""
 		return m, nil
@@ -358,7 +361,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.loading {
-		if msg.String() == "esc" {
+		if msg.String() == "esc" && !m.refreshing {
 			m.loading = false
 		}
 		return m, nil
@@ -505,14 +508,20 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "r":
+		m.loading, m.refreshing = true, true
+		m.loadingMsg = "Refreshing subscriptions…"
+		m.err = nil
 		fc := feed.NewClient(m.cfg.CookiesPath)
-		return m, func() tea.Msg {
-			ctx := context.Background()
-			if err := m.store.Refresh(ctx, fc); err != nil {
+		store := m.store
+		return m, tea.Batch(func() tea.Msg {
+			if err := store.Refresh(context.Background(), fc); err != nil {
 				return errMsg(err)
 			}
-			return subsLoadedMsg(m.store.List())
-		}
+			if err := store.Save(); err != nil {
+				return errMsg(err)
+			}
+			return subsLoadedMsg(store.List())
+		}, m.spinner.Tick)
 
 	case " ":
 		if m.screen == ScreenPlayer {
