@@ -69,6 +69,7 @@ type Model struct {
 	// Loading stuff
 	loading    bool
 	loadingMsg string
+	refreshing bool
 	spinner    spinner.Model
 
 	playbackStarted bool

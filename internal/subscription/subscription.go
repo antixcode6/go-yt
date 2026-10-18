@@ -70,6 +70,16 @@ func (s *Store) Save() error {
 	return os.WriteFile(s.path, data, 0o644)
 }
 
+// SetVideos caches a channel's videos and saves the list.
+func (s *Store) SetVideos(channelID string, videos []*feed.Video) error {
+	s.mu.Lock()
+	if sub, ok := s.subs[channelID]; ok {
+		sub.Videos = videos
+	}
+	s.mu.Unlock()
+	return s.Save()
+}
+
 // Add subscribes to a channel by its YouTube channel ID.
 // It immediately fetches the latest videos via the feed client.
 func (s *Store) Add(ctx context.Context, fc *feed.Client, channelID string) (*Subscription, error) {

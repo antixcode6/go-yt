@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -73,12 +74,14 @@ func loadSubsCmd(store *subscription.Store) tea.Cmd {
 }
 
 // loadVideosCmd fetches videos for a given channel ID.
-func loadVideosCmd(fc *feed.Client, channelID string) tea.Cmd {
+func loadVideosCmd(fc *feed.Client, store *subscription.Store, channelID string) tea.Cmd {
 	return func() tea.Msg {
-		ctx := context.Background()
-		_, videos, err := fc.FetchChannel(ctx, channelID)
+		_, videos, err := fc.FetchChannel(context.Background(), channelID)
 		if err != nil {
 			return errMsg(err)
+		}
+		if err := store.SetVideos(channelID, videos); err != nil {
+			log.Println("save subs:", err)
 		}
 		return videosLoadedMsg(videos)
 	}
@@ -158,6 +161,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case subsLoadedMsg:
 		m.subs = msg
+		m.loading = false
+		m.refreshing = false
 		return m, nil
 
 	case videosLoadedMsg:
@@ -196,6 +201,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case errMsg:
 		m.loading = false
+		m.refreshing = false
 		m.err = msg
 		m.statusMsg = ""
 		return m, nil
@@ -355,7 +361,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.loading {
-		if msg.String() == "esc" {
+		if msg.String() == "esc" && !m.refreshing {
 			m.loading = false
 		}
 		return m, nil
@@ -422,11 +428,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.screen == ScreenSubscriptions && m.cursor < len(m.subs) {
 			sub := m.subs[m.cursor]
 			m.selectedSub = m.cursor
-			fc := feed.NewClient(m.cfg.CookiesPath)
+			fc := feed.NewClient(m.cfg.CookiesPath).WithBrowser(m.cfg.CookiesFromBrowser)
 			m.loading = true
 			m.loadingMsg = pickLoadFlavor(sub.Title)
 			m.err = nil
-			return m, tea.Batch(loadVideosCmd(fc, sub.ChannelID), m.spinner.Tick)
+			return m, tea.Batch(loadVideosCmd(fc, m.store, sub.ChannelID), m.spinner.Tick)
 		}
 
 		if m.screen == ScreenVideos && m.cursor < len(m.videos) {
@@ -439,7 +445,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			selected := m.discoverSources[m.cursor]
-			fc := feed.NewClient(m.cfg.CookiesPath)
+			fc := feed.NewClient(m.cfg.CookiesPath).WithBrowser(m.cfg.CookiesFromBrowser)
 
 			switch selected {
 			case "Subscriptions Feed (Personalized)":
@@ -502,14 +508,20 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "r":
-		fc := feed.NewClient(m.cfg.CookiesPath)
-		return m, func() tea.Msg {
-			ctx := context.Background()
-			if err := m.store.Refresh(ctx, fc); err != nil {
+		m.loading, m.refreshing = true, true
+		m.loadingMsg = "Refreshing subscriptions…"
+		m.err = nil
+		fc := feed.NewClient(m.cfg.CookiesPath).WithBrowser(m.cfg.CookiesFromBrowser)
+		store := m.store
+		return m, tea.Batch(func() tea.Msg {
+			if err := store.Refresh(context.Background(), fc); err != nil {
 				return errMsg(err)
 			}
-			return subsLoadedMsg(m.store.List())
-		}
+			if err := store.Save(); err != nil {
+				return errMsg(err)
+			}
+			return subsLoadedMsg(store.List())
+		}, m.spinner.Tick)
 
 	case " ":
 		if m.screen == ScreenPlayer {
@@ -570,7 +582,7 @@ func (m Model) handleInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch mode {
 		case inputAddSub:
 			m.statusMsg = "Adding " + raw + "…"
-			return m, addSubscriptionCmd(m.store, raw, m.cfg.CookiesPath)
+			return m, addSubscriptionCmd(m.store, raw, m.cfg.CookiesPath, m.cfg.CookiesFromBrowser)
 
 		case inputPlayURL:
 			return m.startPlayback(normalizeVideoURL(raw), "Loading…")
@@ -583,7 +595,7 @@ func (m Model) handleInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.err = nil
 			m.loading = true
 			m.loadingMsg = pickLoadFlavor("Searching for " + raw)
-			fc := feed.NewClient(m.cfg.CookiesPath)
+			fc := feed.NewClient(m.cfg.CookiesPath).WithBrowser(m.cfg.CookiesFromBrowser)
 			return m, tea.Batch(
 				fetchSearchResultsCmd(fc, raw, ":20"),
 				m.spinner.Tick,
@@ -639,7 +651,7 @@ func importSubsCmd(store *subscription.Store, path string) tea.Cmd {
 
 // addSubscriptionCmd resolves the input to a channel ID, then adds it to the
 // store. Both steps are network-bound, so they run off the UI thread.
-func addSubscriptionCmd(store *subscription.Store, raw, cookiesPath string) tea.Cmd {
+func addSubscriptionCmd(store *subscription.Store, raw, cookiesPath, browser string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 
@@ -648,7 +660,7 @@ func addSubscriptionCmd(store *subscription.Store, raw, cookiesPath string) tea.
 			return addErrMsg{err: err}
 		}
 
-		fc := feed.NewClient(cookiesPath)
+		fc := feed.NewClient(cookiesPath).WithBrowser(browser)
 		sub, err := store.Add(ctx, fc, channelID)
 		if err != nil {
 			return addErrMsg{err: err}

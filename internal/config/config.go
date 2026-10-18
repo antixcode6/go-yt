@@ -25,7 +25,9 @@ type Config struct {
 	// when VideoOutput is "null" and you only want sound.
 	AudioOnly bool `json:"audio_only"`
 
-	CookiesPath string `json:"cookies_path"`
+	// opt-in cookies from browser via config vs refreshing cookies.txt
+	CookiesPath        string `json:"cookies_path"`
+	CookiesFromBrowser string `json:"cookies_from_browser"`
 
 	// YtdlpFallbackClients are yt-dlp YouTube player clients tried in order
 	// when a video will not load (YouTube sometimes withholds the normal

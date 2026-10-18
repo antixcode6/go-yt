@@ -3,12 +3,16 @@ package feed
 import (
 	"context"
 	"fmt"
+	"log"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/lrstanley/go-ytdlp"
 	"github.com/mmcdole/gofeed"
 )
+
+const minChannelVideos = 15
 
 type Channel struct {
 	ID    string
@@ -28,6 +32,7 @@ type Video struct {
 type Client struct {
 	parser  *gofeed.Parser
 	cookies string
+	browser string
 }
 
 func NewClient(cookiesPath string) *Client {
@@ -39,45 +44,87 @@ func NewClient(cookiesPath string) *Client {
 
 func (c *Client) withCookies() *ytdlp.Command {
 	cmd := ytdlp.New()
-	if c.cookies != "" {
+	switch {
+	case c.browser != "":
+		cmd = cmd.CookiesFromBrowser(c.browser)
+	case c.cookies != "":
 		cmd = cmd.Cookies(c.cookies)
 	}
 	return cmd
+}
+
+func (c *Client) WithBrowser(browser string) *Client {
+	c.browser = browser
+	return c
 }
 
 func ChannelFeedURL(channelID string) string {
 	return fmt.Sprintf("https://www.youtube.com/feeds/videos.xml?channel_id=%s", channelID)
 }
 
-// FetchChannel returns a channel's metadata and recent videos.
-//
-// It tries RSS first because it's fast and cheap, but falls through to yt-dlp
-// on any error. YouTube's RSS endpoint is intermittently broken — it returns
-// 404 for valid channel IDs during peak hours — so yt-dlp is the reliable
-// backend and RSS is a best-effort optimization.
 func (c *Client) FetchChannel(ctx context.Context, channelID string) (*Channel, []*Video, error) {
 	ch, videos, rssErr := c.fetchViaRSS(ctx, channelID)
 	if rssErr == nil && len(videos) > 0 {
+		// RSS includes Shorts and can't tell them apart; drop the ones the
+		// channel's /shorts tab lists. Best effort: on failure, keep everything.
+		if shorts := c.shortIDs(ctx, channelID); len(shorts) > 0 {
+			kept := videos[:0]
+			for _, v := range videos {
+				id := strings.TrimPrefix(v.ID, "yt:video:")
+				if shorts[id] {
+					log.Printf("dropping short: %s", id) // optional, remove once it works
+					continue
+				}
+				kept = append(kept, v)
+			}
+			videos = kept
+		}
+		if len(videos) < minChannelVideos {
+			videos = c.topUp(ctx, channelID, ch.Title, videos)
+		}
 		return ch, videos, nil
 	}
 
-	// RSS failed or returned nothing. Fall back to yt-dlp, which works
-	// regardless of the RSS endpoint's health.
+	// RSS failed or returned nothing. Fall back to yt-dlp (/videos tab only,
+	// so no Shorts, but also no streams).
 	videos, ytErr := c.fetchViaYtdlp(ctx, channelID)
 	if ytErr != nil {
-		// Both failed. Prefer the RSS error since it's usually more
-		// informative (404 vs. a generic yt-dlp extraction error).
 		return nil, nil, fmt.Errorf("rss: %v; yt-dlp: %w", rssErr, ytErr)
 	}
 	if len(videos) == 0 {
 		return nil, nil, fmt.Errorf("no videos for channel %s", channelID)
 	}
-
 	return &Channel{
 		ID:    channelID,
-		Title: videos[0].ChannelName, // yt-dlp populates this
+		Title: videos[0].ChannelName,
 		URL:   "https://www.youtube.com/channel/" + channelID,
 	}, videos, nil
+}
+
+// shortIDs returns the IDs on a channel's /shorts tab (flat, so it's cheap).
+// It returns nil on any failure, including channels with no Shorts tab.
+func (c *Client) shortIDs(ctx context.Context, channelID string) map[string]bool {
+	// Run returns the result even on a non-zero exit, so a partial list still counts.
+	result, _ := c.withCookies().
+		FlatPlaylist().
+		PlaylistItems(":30").
+		PrintJSON().
+		SkipDownload().
+		Run(ctx, "https://www.youtube.com/channel/"+channelID+"/shorts")
+	if result == nil {
+		return nil
+	}
+	infos, err := result.GetExtractedInfo()
+	if err != nil {
+		return nil
+	}
+	ids := make(map[string]bool, len(infos))
+	for _, info := range infos {
+		if info.ID != "" {
+			ids[info.ID] = true
+		}
+	}
+	return ids
 }
 
 func (c *Client) fetchViaRSS(ctx context.Context, channelID string) (*Channel, []*Video, error) {
@@ -111,6 +158,7 @@ func (c *Client) fetchViaYtdlp(ctx context.Context, channelID string) ([]*Video,
 
 	result, err := c.withCookies().
 		FlatPlaylist().
+		MatchFilters("original_url!*=/shorts/ & url!*=/shorts/").
 		PlaylistItems(":20").
 		ExtractorArgs("youtubetab:approximate_date").
 		PrintJSON().
@@ -189,7 +237,7 @@ func (e *PartialError) Error() string {
 // "ERROR: [youtube] " prefix.
 func skippedEntries(stderr string) []string {
 	var out []string
-	for _, line := range strings.Split(stderr, "\n") {
+	for line := range strings.SplitSeq(stderr, "\n") {
 		line = strings.TrimSpace(line)
 		rest, ok := strings.CutPrefix(line, "ERROR:")
 		if !ok {
@@ -215,6 +263,7 @@ func (c *Client) FetchHomeFeed(ctx context.Context, feedURL, limit string) ([]*V
 	// This is slower but necessary for a good user experience.
 	result, err := c.withCookies().
 		ExtractorArgs("youtubetab:skip=webpage,authcheck").
+		MatchFilters("original_url!*=/shorts/ & url!*=/shorts/").
 		LazyPlaylist().
 		IgnoreErrors().
 		PlaylistItems(limit).
@@ -258,4 +307,50 @@ func (c *Client) FetchHomeFeed(ctx context.Context, feedURL, limit string) ([]*V
 		return videos, partial
 	}
 	return videos, nil
+}
+
+// topUp adds videos from the channel's /videos and /streams tabs (neither
+// contains Shorts), dedupes by ID, and returns them newest first.
+func (c *Client) topUp(ctx context.Context, channelID, channelName string, have []*Video) []*Video {
+	seen := make(map[string]bool, len(have))
+	for _, v := range have {
+		seen[strings.TrimPrefix(v.ID, "yt:video:")] = true
+	}
+	for _, tab := range []string{"videos", "streams"} {
+		result, _ := c.withCookies().
+			FlatPlaylist().
+			PlaylistItems(":20").
+			ExtractorArgs("youtubetab:approximate_date").
+			PrintJSON().
+			SkipDownload().
+			Run(ctx, "https://www.youtube.com/channel/"+channelID+"/"+tab)
+		if result == nil {
+			continue
+		}
+		infos, err := result.GetExtractedInfo()
+		if err != nil {
+			continue
+		}
+		for _, info := range infos {
+			if info.ID == "" || seen[info.ID] {
+				continue
+			}
+			seen[info.ID] = true
+			v := &Video{
+				ID:          info.ID,
+				URL:         "https://www.youtube.com/watch?v=" + info.ID,
+				ChannelID:   channelID,
+				ChannelName: channelName,
+			}
+			if info.Title != nil {
+				v.Title = *info.Title
+			}
+			if info.Timestamp != nil {
+				v.Published = time.Unix(int64(*info.Timestamp), 0)
+			}
+			have = append(have, v)
+		}
+	}
+	sort.SliceStable(have, func(i, j int) bool { return have[i].Published.After(have[j].Published) })
+	return have
 }
