@@ -46,7 +46,8 @@ The app creates a default config on first run at
   "download_dir": "/home/user/.config/go-yt/downloads",
   "video_output": "auto",
   "audio_only": false,
-  "cookies_path": ""
+  "cookies_path": "/home/users/.config/go-yt/cookies.txt",
+  "cookies_from_browser": "firefox"
 }
 ```
 
@@ -57,11 +58,30 @@ The app creates a default config on first run at
 | `video_output` | `auto` uses kitty or sixel graphics when your terminal supports them, else an mpv window. `kitty` / `sixel` force one. Any other value is passed to mpv as `--vo` (`gpu` window, `tct` text, `null` no video). |
 | `audio_only` | Adds `--vid=no` to mpv. Pair with `video_output: "null"` for a music-player mode. |
 | `ytdlp_fallback_clients` | yt-dlp YouTube player clients tried in order when a video will not load (default `["web_safari", "android_vr"]`; `[]` turns it off). Works around YouTube withholding streams from some clients/accounts ([yt-dlp #12482](https://github.com/yt-dlp/yt-dlp/issues/12482)). |
-| `cookies_path` | Path to a Netscape-format `cookies.txt`. Required for personalized feeds, subscriptions, and history. |
+| `cookies_path` | Path to a Netscape-format `cookies.txt`. Needed for personalized feeds, subscriptions, and history unless `cookies_from_browser` is set. |
+| `cookies_from_browser` | Read cookies straight from a browser profile instead of a file, using yt-dlp's `--cookies-from-browser` syntax, e.g. `"firefox"` or `"chrome:Default"` (`BROWSER[+KEYRING][:PROFILE][::CONTAINER]`). Takes priority over `cookies_path` when both are set, with no fallback between them. Used for feeds, subscriptions, and refresh; video playback still uses `cookies_path`. Empty by default. |
 
 ### Cookies
 
-Personalized feeds (`:ytsubs`, `:ythistory`) and some videos require authentication. Export cookies from a **private browser window**:
+Personalized feeds (`:ytsubs`, `:ythistory`) and some videos require authentication. There are two ways to provide it.
+
+#### Option 1: read cookies from your browser (recommended)
+
+Log in to YouTube in your normal browser and set `cookies_from_browser` in the config:
+
+```json
+{ "cookies_from_browser": "firefox" }
+```
+
+yt-dlp reads the profile each time it runs, so the cookies never go stale the way an exported file does. Notes:
+
+- Firefox works even while it is open. Chromium-based browsers (Chrome, Brave, ...) lock their cookie database while running, so close the browser first.
+- On Linux, Chromium cookies are encrypted with the desktop keyring (gnome-keyring, KWallet), which may prompt for access.
+- To check that yt-dlp can read your profile, run `yt-dlp --cookies-from-browser firefox --playlist-end 3 --print "%(title)s" ":ytsubs"` in a terminal first.
+
+#### Option 2: export a cookies.txt
+
+Export cookies from a **private browser window**:
 
 1. Open a private/incognito window and log into YouTube
 2. Navigate to `https://www.youtube.com/robots.txt` in the same tab
@@ -74,7 +94,8 @@ Treat the cookies file as a credential:
 ```sh
 chmod 600 ~/.config/go-yt/cookies.txt
 ```
-Alternatively, if you already have yt-dlp installed you can also run `yt-dlp --cookies output.txt --playlist-end 3 --print "%(title)s" ":ytsubs" `
+
+Alternatively, if you already have yt-dlp installed you can also run `yt-dlp --cookies output.txt --playlist-end 3 --print "%(title)s" ":ytsubs"`
 
 
 ## Keybindings
