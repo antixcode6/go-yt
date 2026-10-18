@@ -32,6 +32,7 @@ type Video struct {
 type Client struct {
 	parser  *gofeed.Parser
 	cookies string
+	browser string
 }
 
 func NewClient(cookiesPath string) *Client {
@@ -43,10 +44,18 @@ func NewClient(cookiesPath string) *Client {
 
 func (c *Client) withCookies() *ytdlp.Command {
 	cmd := ytdlp.New()
-	if c.cookies != "" {
+	switch {
+	case c.browser != "":
+		cmd = cmd.CookiesFromBrowser(c.browser)
+	case c.cookies != "":
 		cmd = cmd.Cookies(c.cookies)
 	}
 	return cmd
+}
+
+func (c *Client) WithBrowser(browser string) *Client {
+	c.browser = browser
+	return c
 }
 
 func ChannelFeedURL(channelID string) string {
