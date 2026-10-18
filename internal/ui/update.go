@@ -81,7 +81,7 @@ func loadVideosCmd(fc *feed.Client, store *subscription.Store, channelID string)
 			return errMsg(err)
 		}
 		if err := store.SetVideos(channelID, videos); err != nil {
-			log.Println("save subs:", err) // drop this if you'd rather not log
+			log.Println("save subs:", err)
 		}
 		return videosLoadedMsg(videos)
 	}
